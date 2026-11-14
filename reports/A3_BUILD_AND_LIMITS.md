@@ -1403,3 +1403,37 @@ Image 一并裁剪并计入 `clippedCount`）；`flash-detect.test.mjs` +1（第
 - 调试观察者旁证：Zotero 10 每次 reader tab 切换发 `select:tab:["tab-XXXX"]`，打开时另发 `load:tab`；插件观察者全部收到。
 - 遗留观察：修复前那次卡死采样（`wake.count=1`、481 `lastValidation:null`+`docIdStale:true`）与「切换多次」的叙述不完全吻合，疑为采样时进程/时机错位；若复发请立刻采 `probeAll()`，那将是新边界的证据。
 - 待补验：隐藏 >60 s（realm 重建）慢切换一次、off/on 一次；预期分别由 toolbar-render 唤醒与 enable 路径覆盖。
+
+## 第 29 轮：启动期快速切换不反色——合并 select 只唤醒 ids[0] — v0.1.29
+
+### 真机复现（用户明确可触发，0.1.28）
+
+打开 Zotero（多 PDF tab 恢复）后立刻快速切换，切到的页面不识别、不反色；一次 on/off/on 恢复；等应用完全启动后再切换则一切正常（第 28 轮验收即稳态路径）。
+
+### 根因（PROVEN：调试观察者旁证 + 卡死样本吻合）
+
+1. **notifier 启动期合并**：Zotero 启动阶段 Notifier 对事件排队合并，观察者在多次切换中只收到**一条** `select`（卡死样本 `wake.count=1`、`nullTarget=0`），`ids` 携带多个 tabID。
+2. **`wakeTabSessions` 只读 `ids[0]`**：合并通知只唤醒第一个 tab 的会话；实际在屏幕上的 481 从未被敲门（样本 `lastValidation:null`）。
+3. **启动快速路径戳错身份**：`start()` ready 后直接 `syncDocumentId()`，启动风暴里 realm 解析可能指向别人的窗口，戳了外来指纹（`docIdStale:true`）且不产生验证记录。
+4. **之后无人再敲门**：481 的总线订阅绑在错 realm 上（自身 `pagesloaded`/`pagerendered` 到不了）、deck 切换的 `select` 已被合并消费、`visibilitychange` 不触发——直到 `setEnabled` 强制重解析 realm 才自愈，与「on/off/on 有效」一致。
+- 旁证：调试观察者在稳态收到每次切换的 `select:tab:["tab-XXXX"]`，tab 加载时另有 `load:tab`。
+
+### 修复（`main.js wakeTabSessions`，检测层零改动）
+
+1. **遍历全部 ids**：每条 id 经 `getByTabID` 解析进 `Set`，命中集合的会话全部唤醒；单条坏 id 不影响整批。解析集为空时保留「唤醒所有」兜底（未定位会话语义不变）。
+2. **接受 `load:tab`**：唤醒 = 幂等的重验证+重画，对启动期加载完成的 tab 是确定性唤醒源；其余事件（如 `modify`）仍忽略。
+3. `wakeStats` 计数语义明确为**按通知计**（合并批次算一次唤醒过程），文档更新。
+
+### 测试
+
+- `probe-all.test.mjs` 新增 2 条（均经 `fakeNotifier().trigger` 走真实派发路径）：合并 `select [1001,1002]` 两个会话都被唤醒、`[1002,1003]` 只点名唤醒不误伤；`load` 通知唤醒对应会话且 `modify` 不唤醒不计数。
+- 全量 `npm test`：419 tests / **0 fail**（417 → 419）；既有 select 路由与 wakeStats 用例未改动全过。
+
+### 真机验收要点（用户复现路径）
+
+- 重启 Zotero（多 tab 恢复）→ 立刻快速切换：每个 tab 反色应自动出现，无需 on/off/on。
+- 若仍卡：立刻采 `probeAll()`，看 481 类会话 `lastValidation` 是否出现 `tab-activate`（唤醒到达但未愈）或仍 `null`（唤醒仍未达，需查合并通知的 ids 形状）。
+
+### 构建产物
+
+- `package.json`、`manifest.json`、`build/manifest.json` 同为 0.1.29；`npm run build` → `dist/figure-color-preservation-0.1.29.xpi`（49,794 字节）；`build/` 与 `dist/` 重新生成，未手改。

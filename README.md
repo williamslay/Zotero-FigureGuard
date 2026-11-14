@@ -2,7 +2,7 @@
 
 Zotero 10 原生 PDF 阅读器的深色主题会把整页反色：文字变白是对的，彩色图表却跟着变成灰白轮廓。FigureGuard 自动识别页面里的图表区域，把这些区域恢复为 PDF 原始颜色，其余部分保持深色主题。不修改 PDF 文件，不依赖 Reading Mode，不改 Zotero 的排版。
 
-> 版本 0.1.28。插件 ID `figure-color-preservation@local`，兼容 Zotero 7–10（真机验证：Zotero 10.0.8 / Windows）。
+> 版本 0.1.29。插件 ID `figure-color-preservation@local`，兼容 Zotero 7–10（真机验证：Zotero 10.0.8 / Windows）。
 
 ## 它做什么
 
@@ -21,7 +21,7 @@ Zotero 10 原生 PDF 阅读器的深色主题会把整页反色：文字变白�
 
 ```bash
 npm install
-npm run build   # → dist/figure-color-preservation-0.1.28.xpi
+npm run build   # → dist/figure-color-preservation-0.1.29.xpi
 ```
 
 ## 工作原理（简）

@@ -646,42 +646,58 @@ function installViewerBridge(win) {
  * the selected reader got woken, the hidden one did not, because the selected one
  * also gets its own `renderToolbar`.
  *
- * @param {string} event Notifier event, e.g. "select".
+ * Every id in `ids` is resolved, not just the first: while the app is starting up
+ * Zotero's Notifier queues the events it fires and hands observers one merged
+ * notification carrying several tab ids, so a read of `ids[0]` woke one of the
+ * tabs the user had switched through and left the rest of them — the tab actually
+ * on screen — asleep, with nothing left to wake it once the boot storm was over.
+ *
+ * Both `select` and `load` are wakes. `load:tab` is the deterministic one for a
+ * tab whose content finished loading during that storm, and a wake is an
+ * idempotent re-validation and repaint, so reacting to it costs nothing.
+ *
+ * @param {string} event Notifier event, e.g. "select" or "load".
  * @param {Array<*>|undefined|null} [ids] Tab ids the event carries.
  * @param {object} [extra] Notifier's extra data, may carry `id`.
  * @returns {void}
  */
 /**
  * Tally of notifier-driven wakes, exposed for `probeAll()`: `count` is how many
- * `select` events reached `wakeTabSessions`, `nullTarget` how many of them could
- * not resolve a reader for the tab id — the wake-all fallback path. A growing
- * `nullTarget` means the notifier payload shape differs from the documented
- * `(event, type, ids, extra)` on this machine, and every switch wakes every
- * session instead of the selected one.
+ * tab notifications reached `wakeTabSessions`, `nullTarget` how many of them could
+ * not resolve a reader for any of the tab ids they carried — the wake-all fallback
+ * path. Both are per notification, not per tab id, so a coalesced startup batch
+ * still reads as one wake pass. A growing `nullTarget` means the notifier payload
+ * shape differs from the documented `(event, type, ids, extra)` on this machine,
+ * and every switch wakes every session instead of the selected one.
  * @type {{ count: number, nullTarget: number }}
  */
 export const wakeStats = { count: 0, nullTarget: 0 };
 
 export function wakeTabSessions(event, ids, extra) {
-  if (event !== "select") return;
+  if (event !== "select" && event !== "load") return;
   const zotero = getZotero();
-  const firstId = Array.isArray(ids) ? ids[0] : undefined;
-  const tabId = firstId ?? extra?.id ?? (typeof ids === "string" ? ids : undefined);
-  let target = null;
-  try {
-    target = zotero?.Reader?.getByTabID?.(tabId) ?? null;
-  } catch (ignored) {
-    target = null;
+  const rawIds = Array.isArray(ids) ? ids : ids === undefined || ids === null ? [] : [ids];
+  const tabIds = rawIds.filter((id) => id !== undefined && id !== null);
+  if (!tabIds.length && extra?.id !== undefined && extra?.id !== null) tabIds.push(extra.id);
+  /** @type {Set<object>} The readers the notification's tab ids resolved to. */
+  const targets = new Set();
+  for (const tabId of tabIds) {
+    try {
+      const target = zotero?.Reader?.getByTabID?.(tabId) ?? null;
+      if (target) targets.add(target);
+    } catch (ignored) {
+      // A half-built or hostile Reader only means this one id cannot be placed.
+    }
   }
   wakeStats.count += 1;
-  if (!target) wakeStats.nullTarget += 1;
+  if (!targets.size) wakeStats.nullTarget += 1;
   for (const [, record] of sessions) {
     const session = record.session;
     if (!session || session.destroyed) continue;
-    // The selected tab, or any session we cannot place: a reader whose realm
-    // went unidentifiable is woken too, because that is when the identity of
-    // the document it paints stopped being its own.
-    if (target && record.reader !== target && session.reader !== target) continue;
+    // The tabs the notification named, or — when nothing resolved — every session,
+    // including one whose realm went unidentifiable: that is when the identity of
+    // the document it paints stopped being provably its own.
+    if (targets.size && !targets.has(record.reader) && !targets.has(session.reader)) continue;
     try {
       session.onTabActivate?.();
     } catch (err) {

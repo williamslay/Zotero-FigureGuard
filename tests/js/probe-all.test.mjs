@@ -648,6 +648,81 @@ describe("probeAll: per-reader identity", () => {
     second.destroy();
   });
 
+  it("wakes every session a coalesced startup select names", async () => {
+    closeAll();
+    startup({ id: "probe-coalesced-select" });
+    const first = await openReader(960, { currentPageNumber: 1 });
+    const second = await openReader(961, { currentPageNumber: 1 });
+    let firstWakes = 0;
+    let secondWakes = 0;
+    first.onTabActivate = () => {
+      firstWakes += 1;
+    };
+    second.onTabActivate = () => {
+      secondWakes += 1;
+    };
+    const zotero = globalThis.Zotero;
+    const notifier = fakeNotifier();
+    zotero.Notifier = notifier.api;
+    zotero.Reader.getByTabID = (tabId) =>
+      tabId === 1001 ? first.reader : tabId === 1002 ? second.reader : null;
+    addZoteroNotifier(zotero);
+
+    const before = { count: wakeStats.count, nullTarget: wakeStats.nullTarget };
+
+    // The reported startup shape: Zotero's Notifier queues the switches fired while
+    // the app boots and dispatches them as ONE notification carrying every merged
+    // tab id. Reading `ids[0]` woke one tab and left the one on screen asleep.
+    notifier.trigger("select", "tab", [1001, 1002]);
+    assert.equal(firstWakes, 1, "the first tab of the merged notification wakes");
+    assert.equal(secondWakes, 1, "and so does the second: a merged batch wakes both readers");
+    assert.equal(wakeStats.count - before.count, 1, "the merged batch is one wake pass");
+    assert.equal(wakeStats.nullTarget - before.nullTarget, 0, "both ids resolved, so no wake-all fallback");
+
+    firstWakes = 0;
+    secondWakes = 0;
+    notifier.trigger("select", "tab", [1002, 1003]);
+    assert.equal(secondWakes, 1, "a batch still wakes the reader its resolvable id names");
+    assert.equal(firstWakes, 0, "and a batch that resolved an id does not fall back to waking all");
+    assert.equal(wakeStats.count - before.count, 2, "one notification, one wake pass");
+    assert.equal(wakeStats.nullTarget - before.nullTarget, 0, "a partly resolvable batch is not the fallback path");
+
+    delete zotero.Notifier;
+    first.destroy();
+    second.destroy();
+  });
+
+  it("wakes on a load notification for the tab, not only on select", async () => {
+    closeAll();
+    startup({ id: "probe-load-wake" });
+    const session = await openReader(962, { currentPageNumber: 1 });
+    let wakes = 0;
+    session.onTabActivate = () => {
+      wakes += 1;
+    };
+    const zotero = globalThis.Zotero;
+    const notifier = fakeNotifier();
+    zotero.Notifier = notifier.api;
+    zotero.Reader.getByTabID = (tabId) => (tabId === 2001 ? session.reader : null);
+    addZoteroNotifier(zotero);
+
+    const before = { count: wakeStats.count, nullTarget: wakeStats.nullTarget };
+
+    // `load:tab` is the deterministic wake for a tab whose content finished loading
+    // during the startup storm, when the select for it was merged into another batch.
+    notifier.trigger("load", "tab", [2001]);
+    assert.equal(wakes, 1, "the load notification wakes the session for that tab");
+    assert.equal(wakeStats.count - before.count, 1, "a load wake is tallied like a select");
+    assert.equal(wakeStats.nullTarget - before.nullTarget, 0, "the tab id resolved, so no wake-all fallback");
+
+    notifier.trigger("modify", "tab", [2001]);
+    assert.equal(wakes, 1, "an unrelated event still wakes nobody");
+    assert.equal(wakeStats.count - before.count, 1, "and it is not tallied");
+
+    delete zotero.Notifier;
+    session.destroy();
+  });
+
   it("unregisters the observer with the exact id Zotero returned", () => {
     closeAll();
     shutdown();

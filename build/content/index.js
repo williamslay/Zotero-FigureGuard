@@ -4607,22 +4607,25 @@ var FigureColorPlugin = (() => {
   }
   var wakeStats = { count: 0, nullTarget: 0 };
   function wakeTabSessions(event, ids, extra) {
-    if (event !== "select") return;
+    if (event !== "select" && event !== "load") return;
     const zotero = getZotero();
-    const firstId = Array.isArray(ids) ? ids[0] : void 0;
-    const tabId = firstId ?? extra?.id ?? (typeof ids === "string" ? ids : void 0);
-    let target = null;
-    try {
-      target = zotero?.Reader?.getByTabID?.(tabId) ?? null;
-    } catch (ignored) {
-      target = null;
+    const rawIds = Array.isArray(ids) ? ids : ids === void 0 || ids === null ? [] : [ids];
+    const tabIds = rawIds.filter((id) => id !== void 0 && id !== null);
+    if (!tabIds.length && extra?.id !== void 0 && extra?.id !== null) tabIds.push(extra.id);
+    const targets = /* @__PURE__ */ new Set();
+    for (const tabId of tabIds) {
+      try {
+        const target = zotero?.Reader?.getByTabID?.(tabId) ?? null;
+        if (target) targets.add(target);
+      } catch (ignored) {
+      }
     }
     wakeStats.count += 1;
-    if (!target) wakeStats.nullTarget += 1;
+    if (!targets.size) wakeStats.nullTarget += 1;
     for (const [, record] of sessions) {
       const session = record.session;
       if (!session || session.destroyed) continue;
-      if (target && record.reader !== target && session.reader !== target) continue;
+      if (targets.size && !targets.has(record.reader) && !targets.has(session.reader)) continue;
       try {
         session.onTabActivate?.();
       } catch (err) {
