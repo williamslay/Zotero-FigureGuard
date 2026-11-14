@@ -1395,3 +1395,11 @@ Image 一并裁剪并计入 `clippedCount`）；`flash-detect.test.mjs` +1（第
 ### 构建产物
 
 - `package.json`、`manifest.json`、`build/manifest.json` 同为 0.1.28；`npm run build` → `dist/figure-color-preservation-0.1.28.xpi`（49,715 字节）；`build/` 与 `dist/` 重新生成，未手改。
+
+### 真机验收结果（0.1.28）
+
+- 快切换（<60 s）反色跟随正确；来回 8 次切换 `wake.count` 同步增长 8，`nullTarget=0`。
+- 四会话（item 316/457/481/483）各自独立指纹，`docIdStale` 全 false，`lastValidation` 均有新鲜 `document-check ok` 记录（`tab-activate` 被随后的 debounce 记录覆盖属预期）。
+- 调试观察者旁证：Zotero 10 每次 reader tab 切换发 `select:tab:["tab-XXXX"]`，打开时另发 `load:tab`；插件观察者全部收到。
+- 遗留观察：修复前那次卡死采样（`wake.count=1`、481 `lastValidation:null`+`docIdStale:true`）与「切换多次」的叙述不完全吻合，疑为采样时进程/时机错位；若复发请立刻采 `probeAll()`，那将是新边界的证据。
+- 待补验：隐藏 >60 s（realm 重建）慢切换一次、off/on 一次；预期分别由 toolbar-render 唤醒与 enable 路径覆盖。
