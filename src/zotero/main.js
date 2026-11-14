@@ -490,6 +490,19 @@ function onRenderToolbar(event) {
     if (!reader) return;
     const session = ensureSession(reader);
     if (!session || typeof event.append !== "function") return;
+    // A reader panel that was thrown away while its tab stayed hidden comes back
+    // with a freshly rendered toolbar, so this render is the deterministic moment
+    // the session learns the realm it paints has been replaced. A ready, idle
+    // session re-validates here: it re-resolves the realm, adopts the new window,
+    // rebinds its events and repaints; an unchanged realm repaints nothing. A
+    // session that is still booting is left to the recovery loop, which owns it.
+    if (session.ready && !session.destroyed && !session.pending?.size) {
+      try {
+        session.ensureCurrentDocument("toolbar-render");
+      } catch (err) {
+        warnOnce("toolbar-render-wake", err);
+      }
+    }
     const doc = event?.doc ?? null;
     if (!doc?.createElement) return;
     const button = createButton(doc, session);
@@ -682,19 +695,28 @@ export function wakeTabSessions(event, ids, extra) {
  * stays hidden: only the selected reader gets `renderToolbar`, so the session
  * behind the other tab never learns to re-check its own mount.
  *
+ * The contract is Zotero's own, read from its reader: the first argument is an
+ * observer OBJECT carrying `notify(event, type, ids, extraData)` — Zotero's
+ * dispatcher calls `ref.notify(...)`, so a bare callback throws a `TypeError`
+ * there, the throw is swallowed by the notifier, and the subscription never
+ * fires. The third argument is the observer's name and the return value is a
+ * string hash, which `removeZoteroNotifier()` hands back to unregister.
+ *
  * @param {object|null} zotero The Zotero root.
- * @returns {number|null} Notifier id, when one could be registered.
+ * @returns {string|number|null} Notifier id, when one could be registered.
  */
 export function addZoteroNotifier(zotero) {
   const api = zotero?.Notifier;
   if (!api || typeof api.registerObserver !== "function" || typeof api.unregisterObserver !== "function") return null;
   try {
-    const id = api.registerObserver("figure-color", "tab", (event, type, ids, extra, idArg) => {
-      void type;
-      void idArg;
-      wakeTabSessions(event, ids, extra);
-    });
-    return typeof id === "number" ? id : null;
+    const ref = {
+      notify: (event, type, ids, extra) => {
+        void type;
+        wakeTabSessions(event, ids, extra);
+      },
+    };
+    const id = api.registerObserver(ref, ["tab"], "figure-color");
+    return typeof id === "string" || typeof id === "number" ? id : null;
   } catch (err) {
     warnOnce("notifier-register", err);
     return null;
@@ -702,11 +724,12 @@ export function addZoteroNotifier(zotero) {
 }
 
 /**
- * Unsubscribes the Zotero notifier.
+ * Unsubscribes the Zotero notifier. The id is whatever `registerObserver`
+ * returned — a string hash on Zotero 10 — so only `null` means "nothing to do".
  */
 function removeZoteroNotifier() {
   const api = getZotero()?.Notifier;
-  if (typeof zoteroNotifierId !== "number" || !api || typeof api.unregisterObserver !== "function") {
+  if (zoteroNotifierId == null || !api || typeof api.unregisterObserver !== "function") {
     zoteroNotifierId = null;
     return;
   }

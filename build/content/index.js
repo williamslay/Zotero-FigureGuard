@@ -3868,7 +3868,12 @@ var FigureColorPlugin = (() => {
       const run = () => {
         this.documentCheckTimer = null;
         this.timers.delete(timer);
-        if (this.ensureCurrentDocument("document-check") !== "ok") return;
+        const identity = this.ensureCurrentDocument("document-check");
+        if (identity === "wait") {
+          this.scheduleSettledCheck();
+          return;
+        }
+        if (identity !== "ok") return;
         const pdfDocument = this.currentPDFDocument();
         const staleKey = this.cacheKey();
         const decision = this.applyDocumentId(resolveDocumentId(pdfDocument));
@@ -4102,7 +4107,12 @@ var FigureColorPlugin = (() => {
      */
     onViewScaleChange() {
       if (!this.enabled || this.destroyed) return;
-      if (this.ensureCurrentDocument("scale-change") !== "ok") return;
+      const identity = this.ensureCurrentDocument("scale-change");
+      if (identity === "wait") {
+        this.scheduleSettledCheck();
+        return;
+      }
+      if (identity !== "ok") return;
       const key = this.cacheKey();
       const jobs = [];
       for (const overlay of [...this.overlays.values()]) {
@@ -4542,6 +4552,13 @@ var FigureColorPlugin = (() => {
       if (!reader) return;
       const session = ensureSession(reader);
       if (!session || typeof event.append !== "function") return;
+      if (session.ready && !session.destroyed && !session.pending?.size) {
+        try {
+          session.ensureCurrentDocument("toolbar-render");
+        } catch (err) {
+          warnOnce("toolbar-render-wake", err);
+        }
+      }
       const doc = event?.doc ?? null;
       if (!doc?.createElement) return;
       const button = createButton(doc, session);
@@ -4617,12 +4634,14 @@ var FigureColorPlugin = (() => {
     const api = zotero?.Notifier;
     if (!api || typeof api.registerObserver !== "function" || typeof api.unregisterObserver !== "function") return null;
     try {
-      const id = api.registerObserver("figure-color", "tab", (event, type, ids, extra, idArg) => {
-        void type;
-        void idArg;
-        wakeTabSessions(event, ids, extra);
-      });
-      return typeof id === "number" ? id : null;
+      const ref = {
+        notify: (event, type, ids, extra) => {
+          void type;
+          wakeTabSessions(event, ids, extra);
+        }
+      };
+      const id = api.registerObserver(ref, ["tab"], "figure-color");
+      return typeof id === "string" || typeof id === "number" ? id : null;
     } catch (err) {
       warnOnce("notifier-register", err);
       return null;
@@ -4630,7 +4649,7 @@ var FigureColorPlugin = (() => {
   }
   function removeZoteroNotifier() {
     const api = getZotero()?.Notifier;
-    if (typeof zoteroNotifierId !== "number" || !api || typeof api.unregisterObserver !== "function") {
+    if (zoteroNotifierId == null || !api || typeof api.unregisterObserver !== "function") {
       zoteroNotifierId = null;
       return;
     }

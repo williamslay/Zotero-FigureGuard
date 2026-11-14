@@ -1301,3 +1301,109 @@ describe("realm ownership and bridge guesses", () => {
     }
   });
 });
+
+describe("reader session: healing after a tab is hidden and shown again", () => {
+  afterEach(() => resetWarnOnce());
+
+  it("rebinds to the realm the reactivated tab hands out", () => {
+    const timers = fakeTimers();
+    try {
+      resetWarnOnce();
+      const firstBus = fakeEventBus();
+      const reader = fakeReader(521, fakeRealm({ eventBus: firstBus, pdfDocument: { numPages: 1 } }));
+      const session = newSession(reader);
+      session.adoptRealm(resolveInnerRealm(reader, session.tag));
+      assert.ok(firstBus.bound.includes("pagesloaded"), "the first realm is subscribed");
+      assert.ok(firstBus.bound.includes("pagerendered"), "the first realm paints late pages");
+
+      // Zotero tears the PDF.js window down when the tab goes away and hands the
+      // reader a new one when it comes back: the old bus died with that window, so
+      // a session that keeps the dead realm never hears about a page render again.
+      const secondBus = fakeEventBus();
+      const second = fakeRealm({ eventBus: secondBus, pdfDocument: { numPages: 1 } });
+      reader._internalReader._primaryView._iframeWindow = second;
+
+      session.onTabActivate();
+
+      assert.equal(session.innerWin, second, "the dead realm is replaced by the live window");
+      assert.equal(session.eventBus, secondBus, "the session is bound to the new bus");
+      assert.ok(firstBus.unbound.includes("pagesloaded"), "the dead bus is unsubscribed");
+      assert.ok(firstBus.unbound.includes("pagerendered"), "the dead repaint observer is dropped");
+      assert.ok(secondBus.bound.includes("pagesloaded"), "the new bus is subscribed");
+      assert.ok(secondBus.bound.includes("pagerendered"), "the new pages get a repaint observer");
+      assert.equal(session.realmSwitches, 1, "the switch is counted for the probe");
+      assert.ok(
+        getWarnLog().some((line) => line.startsWith("realm-switched")),
+        "the switch is logged for Zotero.debug",
+      );
+      session.destroy();
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("repaints a zoom on a proven realm, and defers it while the realm is unproven", () => {
+    const timers = fakeTimers();
+    try {
+      resetWarnOnce();
+      const realm = fakeRealm({ eventBus: fakeEventBus(), pdfDocument: { numPages: 1 } });
+      const session = newSession(fakeReader(523, realm));
+      const settled = spy(session, "scheduleSettledCheck");
+      const paints = [];
+      session.paintOverlay = async (overlay) => {
+        paints.push(overlay);
+      };
+      session.adoptRealm(resolveInnerRealm(session.reader, session.tag));
+      session.documentId = "fcp:item:523:1:aaa";
+      session.overlays.set(1, settledOverlay(1));
+      const mounted = session.overlays.get(1);
+
+      session.ensureCurrentDocument = () => "wait";
+      session.onViewScaleChange();
+      assert.equal(settled.n, 1, "a pass that could not run is re-armed, not lost");
+      assert.equal(paints.length, 0, "nothing is painted under an identity the session cannot prove");
+      assert.equal(session.documentId, "fcp:item:523:1:aaa", "the proven key is not thrown away");
+
+      session.ensureCurrentDocument = () => "rekeyed";
+      session.onViewScaleChange();
+      assert.equal(settled.n, 1, "a re-key re-arms the settled check itself, so no second arming");
+      assert.equal(paints.length, 0, "a re-key paints through its own pass, not through the zoom");
+
+      session.ensureCurrentDocument = () => "ok";
+      session.onViewScaleChange();
+      assert.equal(settled.n, 1, "a clean zoom needs no retry");
+      assert.deepEqual(paints, [mounted], "a proven realm gets its colours back on the spot");
+      session.destroy();
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("keeps the document sweep retrying when its pass lands on an unproven realm", async () => {
+    const timers = fakeTimers();
+    try {
+      resetWarnOnce();
+      const realm = fakeRealm({ eventBus: fakeEventBus(), pdfDocument: { numPages: 1 } });
+      const session = newSession(fakeReader(525, realm));
+      const settled = spy(session, "scheduleSettledCheck");
+      const detach = spy(session, "detachAll");
+      session.adoptRealm(resolveInnerRealm(session.reader, session.tag));
+      session.documentId = "fcp:item:525:1:bbb";
+      session.ensureCurrentDocument = () => "wait";
+
+      session.queueDocumentCheck();
+      assert.equal(timers.lastDelay(), DOCUMENT_CHECK_MS, "the sweep is armed");
+
+      await timers.fireNext();
+
+      assert.equal(settled.n, 1, "the sweep re-arms the settled check instead of parking");
+      assert.ok(timers.delays().includes(SETTLED_REPAINT_MS), "a retry really is queued");
+      assert.equal(detach.n, 0, "nothing is detached while the realm is unproven");
+      assert.equal(session.documentId, "fcp:item:525:1:bbb", "a wait is not a re-key");
+      assert.equal(session.documentCheckTimer, null, "the sweep released its own timer");
+      session.destroy();
+    } finally {
+      timers.restore();
+    }
+  });
+});

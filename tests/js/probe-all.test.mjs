@@ -146,6 +146,50 @@ function fakeDoc() {
   };
 }
 
+/**
+ * Zotero 10's real `Zotero.Notifier` contract, read out of Zotero's own reader:
+ * `registerObserver(ref, types, id, priority)` takes an observer OBJECT that
+ * carries a `notify(event, type, ids, extraData)` method, and hands back a
+ * string hash that unregisters it. `trigger()` is the dispatcher: it calls the
+ * ref the way Zotero's dispatch does, so a registration that handed in a bare
+ * function — the wrong contract that hid the tab-switch regression — throws
+ * here instead of being silently swallowed and never called.
+ *
+ * @returns {{api: {registerObserver: Function, unregisterObserver: Function},
+ *   registered: Array<{ref: object, types: unknown, name: unknown, hash: string}>,
+ *   unregistered: Array<*>,
+ *   trigger: (event: string, type: string, ids: Array<*>, extraData?: object) => void}}
+ */
+function fakeNotifier() {
+  /** @type {Array<{ref: object, types: unknown, name: unknown, hash: string}>} */
+  const registered = [];
+  /** @type {Array<*>} Ids teardown passed to `unregisterObserver`. */
+  const unregistered = [];
+  const api = {
+    registerObserver(ref, types, name) {
+      const hash = `notifier-${registered.length + 1}`;
+      registered.push({ ref, types, name, hash });
+      return hash;
+    },
+    unregisterObserver(id) {
+      unregistered.push(id);
+    },
+  };
+  return {
+    api,
+    registered,
+    unregistered,
+    trigger(event, type, ids, extraData) {
+      for (const entry of registered) {
+        if (typeof entry.ref?.notify !== "function") {
+          throw new TypeError("Zotero.Notifier dispatches ref.notify(): the observer is not an object with a notify method");
+        }
+        entry.ref.notify(event, type, ids, extraData);
+      }
+    },
+  };
+}
+
 /** Lets the `start()` promises of the opened readers settle. */
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -565,36 +609,97 @@ describe("probeAll: per-reader identity", () => {
       secondWakes += 1;
     };
     const zotero = globalThis.Zotero;
-    let registered = null;
-    zotero.Notifier = {
-      registerObserver(notifierID, types, callback) {
-        registered = { notifierID, types, callback };
-        return 7;
-      },
-      unregisterObserver() {},
-    };
+    const notifier = fakeNotifier();
+    zotero.Notifier = notifier.api;
     zotero.Reader.getByTabID = (tabId) => (tabId === 931 ? second.reader : null);
 
     const notifierId = addZoteroNotifier(zotero);
-    assert.equal(notifierId, 7, "the notifier id is kept for unregistering");
-    assert.equal(registered.types, "tab", "the subscription is for tab events");
+    assert.equal(typeof notifierId, "string", "the id Zotero returns is a string hash, and it is kept for teardown");
+    assert.equal(notifier.registered.length, 1, "one subscription per registration");
+    assert.deepEqual(notifier.registered[0].types, ["tab"], "the subscription is for tab events");
+    assert.equal(notifier.registered[0].name, "figure-color", "under the plugin's own observer name");
+    assert.equal(notifier.registered[0].hash, notifierId, "the id reported back is the one Zotero generated");
 
-    // Zotero calls observers as (event, type, ids, extra, id): the tab id is in `ids`.
-    registered.callback("select", "tab", [931], undefined, 7);
+    const before = { count: wakeStats.count, nullTarget: wakeStats.nullTarget };
+
+    // Zotero dispatches as `ref.notify(event, type, ids, extraData)`: the tab id is in `ids`.
+    notifier.trigger("select", "tab", [931]);
     assert.equal(secondWakes, 1, "the session behind the resolved tab wakes");
     assert.equal(firstWakes, 0, "and the other session is left alone");
+    assert.equal(
+      wakeStats.count - before.count,
+      1,
+      "the dispatch really reached the wake tally: a subscription Zotero cannot call leaves it at 0 forever",
+    );
+    assert.equal(wakeStats.nullTarget - before.nullTarget, 0, "the tab id resolved, so no wake-all fallback");
 
     // A tab id Zotero cannot resolve wakes every session, so nothing stays asleep.
-    registered.callback("select", "tab", [999], undefined, 7);
+    notifier.trigger("select", "tab", [999]);
     assert.equal(firstWakes, 1, "an unresolvable tab falls back to waking all");
     assert.equal(secondWakes, 2);
+    assert.equal(wakeStats.nullTarget - before.nullTarget, 1, "and the fallback is tallied");
 
-    registered.callback("modify", "tab", [931], undefined, 7);
+    notifier.trigger("modify", "tab", [931]);
     assert.equal(secondWakes, 2, "a non-select event wakes nobody");
+    assert.equal(wakeStats.count - before.count, 2, "a non-select event is not tallied");
 
     delete zotero.Notifier;
     first.destroy();
     second.destroy();
+  });
+
+  it("unregisters the observer with the exact id Zotero returned", () => {
+    closeAll();
+    shutdown();
+    const zotero = globalThis.Zotero;
+    const notifier = fakeNotifier();
+    zotero.Notifier = notifier.api;
+
+    // `startup()` is what holds the id across the plugin's life, so the teardown
+    // proof goes through it: start with the notifier in place, then shut down.
+    startup({ id: "probe-notifier-teardown" });
+    assert.equal(notifier.registered.length, 1, "startup subscribes to the tab notifier");
+    const hash = notifier.registered[0].hash;
+    assert.equal(typeof hash, "string", "the id is the string hash Zotero generated");
+
+    shutdown();
+    assert.deepEqual(
+      notifier.unregistered,
+      [hash],
+      "teardown hands that same hash back to unregisterObserver: a check on the id's type that rejects a string leaves the observer registered for good",
+    );
+
+    delete zotero.Notifier;
+  });
+
+  it("heals a session whose pdf.js window was replaced, on the next toolbar render", async () => {
+    closeAll();
+    startup({ id: "probe-toolbar-realm-heal" });
+    const opened = getSessions().length;
+    const session = await openReader(940);
+    assert.ok(session.ready, "the reader opened ready");
+    assert.ok(session.innerWin, "the session paints the realm the reader opened with");
+
+    // Zotero throws the reader panel away while its tab is hidden and builds a new
+    // one on the way back: the same reader object, a brand new pdf.js window. The
+    // dead realm's event bus dies with it, so nothing tells the session to repaint
+    // — `renderToolbar` is the one event this route always gets.
+    const fresh = fakeRealm();
+    session.reader._internalReader._primaryView._iframeWindow = fresh;
+
+    handlers.get("renderToolbar")({
+      type: "renderToolbar",
+      reader: session.reader,
+      doc: fakeDoc(),
+      params: {},
+      append() {},
+    });
+    await tick();
+
+    assert.equal(getSessions().length, opened + 1, "the render reused this reader's session");
+    assert.equal(session.innerWin, fresh, "the render is the moment the session learns the realm moved");
+    assert.equal(session.realmSwitches, 1, "the switch is counted for the probe");
+    session.destroy();
   });
 
   it("tallies notifier wakes so the wake-all fallback is visible", async () => {

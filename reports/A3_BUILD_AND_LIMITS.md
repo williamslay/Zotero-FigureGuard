@@ -1356,3 +1356,42 @@ Image 一并裁剪并计入 `clippedCount`）；`flash-detect.test.mjs` +1（第
 ### 构建产物
 
 - `package.json` 与 `manifest.json` 同为 0.1.27；`npm run build` → `dist/figure-color-preservation-0.1.27.xpi`（49,597 字节）；`build/` 与 `dist/` 重新生成，未手改。
+
+## 第 28 轮：切 tab 长时间不刷新的根因——notifier 注册签名错误 — v0.1.28
+
+### 真机回归（0.1.27）
+
+跨文档污染已修复、on/off/on 逻辑正确；但切换 tab 后反色可能长时间不刷新，只有默认打开的 tab 会自动刷新，执行一次 on/off/on 后切换才恢复正常。
+
+### 根因（PROVEN，@oracle 审计 + 代码核对）
+
+`main.js addZoteroNotifier` 用错 Zotero 10 的注册签名：真实契约是 `Notifier.registerObserver(ref, types, id)`，`ref` 必须是带 `notify(event, type, ids, extraData)` 方法的对象（Zotero 自身 reader.js 即此用法），返回**字符串**哈希。旧代码 `registerObserver("figure-color", "tab", callback)` 传了字符串 ref：注册成功（无异常、日志无告警），但每次 `tab` 事件派发 `ref.notify(...)` 在字符串上 TypeError，被 notifier 吞掉——`wakeTabSessions` 从未执行，`wakeStats.count` 恒 0（与历次真机日志吻合）。第二处：返回的字符串哈希被 `typeof id === "number"` 判成 null，`removeZoteroNotifier` 因此从不注销，每启动/卸载周期泄漏一个观察者。该缺陷 0.1.26 即存在，不是本轮新引入的回归，而是「deck 切换没有任何唤醒事件」一直如此的原因。离线 mock 按插件臆想的契约实现 `registerObserver`，且测试直接调 `wakeTabSessions`，所以 412 条测试全部看不到此缺陷。
+
+症状分布的解释：默认/新开 tab 自带 recovery loop 跑到 ready，正常刷新；隐藏 >60 s 的 tab 被 Zotero 卸载后重建 realm，而 ready 后心跳已停、总线/缩放仍绑在死 realm 上——没有任何驱动重解析，只有 `setEnabled`（on/off/on）会完整重采纳+重画，与用户观察一致。0.1.27 的 fail-safe no-paint 撤掉了 0.1.26 依赖的无条件 scalechange 重画，使缺唤醒的问题更显性（PLAUSIBLE）。
+
+### 修复（3 处，检测层零改动）
+
+1. **notifier 注册按真实契约**（`main.js`）：`const ref = { notify: (event, type, ids, extra) => wakeTabSessions(event, ids, extra) }`，`api.registerObserver(ref, ["tab"], "figure-color")`；id 接受 `string|number`，`removeZoteroNotifier` 仅在 `null` 时跳过。
+2. **工具条重渲染即唤醒**（`main.js onRenderToolbar`）：ready、未销毁、无挂起操作的会话在每次 `renderToolbar` 调 `ensureCurrentDocument("toolbar-render")`——realm 被重建后面板必然重渲染工具条，这是确定性唤醒时机；realm 未变则零重画，独立 try/catch（`toolbar-render-wake`）。
+3. **`wait` 不再停摆**（`reader-session.js`）：`queueDocumentCheck.run` 与 `onViewScaleChange` 对 `"wait"` 判定先 `scheduleSettledCheck()` 再返回（防抖已有），未证实 realm 不再永久停放；`"rekeyed"`/`"ok"` 行为不变，门控未放松。
+
+未采纳（留作后备）：ready 后保留慢心跳轮询 realm；visibilitychange  hacks 已证伪。
+
+### 测试
+
+- `probe-all.test.mjs` mock 重写为 Zotero 真实契约：`registerObserver(ref, types, id)` 返回字符串哈希并存储 `{ref, types}`，`trigger(event, type, ids, extra)` 调 `ref.notify(...)` 且 ref 无 `notify` 即抛；tab 切换用例改经 `trigger("select","tab",[tabID])` 驱动并断言 `wakeStats` 计数增长；新增「用 Zotero 返回的原 id 注销」用例。
+- 新增死 realm 复活用例（probe-all）：会话在 W1 ready 后窗口被替换，下一次 `renderToolbar` 触发采纳 W2——新总线重绑、`realmSwitches` 增长、发生重画。
+- `reader-session.test.mjs` 新增「隐藏再显示后的自愈」describe：`onTabActivate` 换 realm 重绑（新总线绑定、死总线解绑、`realm-switched` 日志）、未证实 realm 上缩放延迟而 `wait` 恰好重排一次 settled、document sweep 对 `wait` 重排不停摆。
+- 对照验证：还原 `main.js`/`reader-session.js` 后恰好这 5 条新/改用例 RED，恢复后全绿。
+- 全量 `npm test`：417 tests / **0 fail**（412 → 417）。
+
+### 真机验收要点
+
+- 每次切换 tab 后 `probeAll().wake` 计数应增长；颜色恢复不再依赖 on/off/on。
+- Zotero 错误日志不再出现每次切 tab 一条的 `ref.notify` TypeError。
+- 若 `wake.count` 增长但 `nullTarget` 同步增长，说明该 build 的 `getByTabID` 不解析——此时由 toolbar-render 唤醒兜底，仍应恢复。
+- 若某 tab 长期不画且 `realmUnproven: true`，属「宁可不画」态，观察 settled 重排是否最终收敛。
+
+### 构建产物
+
+- `package.json`、`manifest.json`、`build/manifest.json` 同为 0.1.28；`npm run build` → `dist/figure-color-preservation-0.1.28.xpi`（49,715 字节）；`build/` 与 `dist/` 重新生成，未手改。

@@ -1440,8 +1440,15 @@ export class ReaderSession {
       // and a drift has to release the previous key and the mounted pages before this
       // pass reads the live document. A `rekeyed` sweep already detached, repainted
       // and re-armed the settled check; a `wait` paints nothing rather than painting
-      // an unproven realm's regions under this reader's key.
-      if (this.ensureCurrentDocument("document-check") !== "ok") return;
+      // an unproven realm's regions under this reader's key — so it re-arms the
+      // settled check instead of dropping the pass, otherwise a realm that stays
+      // unproven here parks for good with nothing left to re-try it.
+      const identity = this.ensureCurrentDocument("document-check");
+      if (identity === "wait") {
+        this.scheduleSettledCheck();
+        return;
+      }
+      if (identity !== "ok") return;
       const pdfDocument = this.currentPDFDocument();
       // Read before `applyDocumentId()`: after a swap `cacheKey()` names the new
       // document, and invalidating that leaves the regions parsed from the previous
@@ -1719,7 +1726,15 @@ export class ReaderSession {
     // A zoom is a repaint, so it reads the cache like every other paint: the boxes
     // this method reuses were parsed for the document the overlay was stamped with,
     // and a wake that finds another document has to say so before they are re-used.
-    if (this.ensureCurrentDocument("scale-change") !== "ok") return;
+    // `wait` is the unproven-realm case: nothing is painted, and the settled check is
+    // re-armed so the pass is tried again rather than lost — without it a realm that
+    // stays unproven would leave the zoom with no repaint and no retry.
+    const identity = this.ensureCurrentDocument("scale-change");
+    if (identity === "wait") {
+      this.scheduleSettledCheck();
+      return;
+    }
+    if (identity !== "ok") return;
     const key = this.cacheKey();
     const jobs = [];
     for (const overlay of [...this.overlays.values()]) {
