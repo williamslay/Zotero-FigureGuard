@@ -1,52 +1,64 @@
-# Zotero Figure Color Preservation — Stage A / Stage B 交接包
+# Zotero FigureGuard
 
-> 本包是 **Codex 的开发输入**，不是已完成或验证通过的 Zotero 插件。
+Zotero 10 原生 PDF 阅读器的深色主题会把整页反色：文字变白是对的，彩色图表却跟着变成灰白轮廓。FigureGuard 自动识别页面里的图表区域，把这些区域恢复为 PDF 原始颜色，其余部分保持深色主题。不修改 PDF 文件，不依赖 Reading Mode，不改 Zotero 的排版。
 
-目标：保留 Zotero 10 原生 PDF 页面布局和 Dark Theme；自动识别图表区域，将这些区域以 PDF 原始颜色显示（允许局部白底），不修改 PDF，不进入 Reading Mode。
+> 版本 0.1.26。插件 ID `figure-color-preservation@local`，兼容 Zotero 7–10（真机验证：Zotero 10.0.8 / Windows）。
 
-**实施分工**
+## 它做什么
 
-- **Stage A — Codex 独立交付**：无需安装 Zotero；完成技术路径确认、JavaScript/TypeScript 自动识别实现、独立 PDF.js 渲染实验、插件源码、可安装的候选 `.xpi`、离线测试与测试报告。
-- **Stage B — 用户实机验收**：在真实 Zotero（用户自行提供版本）安装候选插件并检验 Dark Theme、双栏排版、Figure 2/3、滚动/缩放/标注及兼容性。仅 Stage B 可以证明最终 Zotero 集成有效。
+- 在 reader 渲染的每一页上自动检测「图表区域」（矢量路径与 Form XObject 构成的插图），在检测到的矩形上叠加原色画布，白底显示图内内容。
+- 检测基于 pdf.js 的 `getOperatorList()`：按绘图指令聚类出路径与 XObject 边界，再过滤满页边框、装饰线、文字下划线等噪声。规则以四篇体系结构论文的 accepted 区域集合为基线逐字节钉死。
+- 缩放、翻页、窗口变化后自动重画；多页签切换自动跟随；区域按「条目 + 文档指纹」缓存，重复打开不重新检测。
+- 工具栏开关一键启停。
 
-## Codex 从这里开始
+## 安装
 
-1. 阅读 [`docs/STAGE_A_IMPLEMENTATION_SPEC.md`](docs/STAGE_A_IMPLEMENTATION_SPEC.md) —— **唯一规范文档**，覆盖之前的“手动框选 MVP”版本。
-2. 阅读 [`docs/DECISIONS_AND_RISKS.md`](docs/DECISIONS_AND_RISKS.md) —— 明确已确认事实与有待验证的内部 API。
-3. 本地运行 `python -m pip install -r requirements-dev.txt`，然后 `python -m unittest discover -s tests -v`。
-4. 以 [`docs/CODEX_START_PROMPT.md`](docs/CODEX_START_PROMPT.md) 为任务指令，按 A0→A1→A2→A3 阶段开发。
-5. 按 [`docs/STAGE_B_USER_CHECKLIST.md`](docs/STAGE_B_USER_CHECKLIST.md) 提供人工验收指引与诊断材料。
+1. 下载 `dist/figure-color-preservation-<版本>.xpi`（或本地 `npm run build` 生成）。
+2. Zotero → 工具 → 插件 → 齿轮 → Install Plugin From File…，选择 xpi。
+3. 打开任意 PDF，深色主题下图表区域即显示原色；工具栏按钮可临时关闭。
 
-## 内容
+`dist/` 未入库，需本地构建：
 
-```text
-README.md
-requirements-dev.txt
-fixture/
-  PipeBWrite.pdf                  原始测试 PDF（私有测试用，不得向公开仓库推送）
-  fixture-verified.json           第 5 页结构对象及坐标预期
-  figure2-original-3x.png         Figure 2 原色参考
-  figure3-original-3x.png         Figure 3 原色参考
-  page5-original-2x.png           整页原色参考
-scripts/
-  inspect_pdf.py                  独立 PDF 对象定位脚本（Python oracle）
-tests/
-  test_fixture.py                 无 Zotero 的结构检查
-  test_package_structure.py       交接包完整性检查
-docs/
-  STAGE_A_IMPLEMENTATION_SPEC.md  核心开发约束 / 阶段 A 交付要求
-  DECISIONS_AND_RISKS.md          技术判断与禁忌
-  STAGE_B_USER_CHECKLIST.md       人工安装及回报模板
-  CODEX_START_PROMPT.md           可复制指令
-  REFERENCES.md                   资料出处
+```bash
+npm install
+npm run build   # → dist/figure-color-preservation-0.1.26.xpi
 ```
 
-### 关键事实
+## 工作原理（简）
 
-第 5 页 `/Im5`、`/Im6` 是 **Form XObject**（非 `/Image`）：分别对应 Figure 2、Figure 3；PDF 不含结构树 `/StructTreeRoot`；这篇测试 PDF 无法靠“仅保留 Image XObject 原色”解决。`getOperatorList()` 是否携带 Form 的边界与可用信息必须由 Codex 在目标 PDF.js 版本中实测。
+- **检测层**（`src/core/detector.js`）：纯函数，输入 pdf.js 操作列表，输出一页的图表矩形集合。已冻结，改动必须过基线测试。
+- **缓存层**（`src/core/cache.js`）：区域集合按 `item:<条目ID>|<文档指纹>` 作用域缓存，跨页签互不污染。
+- **集成层**（`src/zotero/`）：bootstrap XPI。为每个 reader 会话建立「realm」——即该 reader 自己的 pdf.js 窗口——并校验归属；文档指纹漂移、页签切换（Zotero Notifier `tab` 事件）、realm 被 Zotero 回收重建等场景都有恢复路径。覆盖层画布带来源戳（`fcpRealm` / `fcpDoc`），可诊断「画布画进了别人的页面」这类问题。
 
-### 不属于 Stage A 的保证
+## 开发
 
-- 不能保证某个 `.xpi` 在尚未测试的 Zotero 本机版本上能安装和正常工作。
-- 独立 PDF.js 渲染通过，不代表 Zotero 的深色 Blender 能被成功绕过。
-- `ctx.skipBlender` 等引用来自特定 Zotero 构建的第三方逆向验证，不是公开稳定 API。
+```bash
+npm install
+npm test        # 399 个用例 / 66 个 suite（node:test，含 reports/*.json 基线逐字节校验）
+npm run build   # → dist/ 下打包 xpi
+```
+
+- 检测基线：`reports/*-detection.json`（PipeBWrite 18 区、FluidKV 18 区、Flash 10 区、Borges 9 区），任何检测层改动若移动这些矩形，测试直接失败。
+- 开发与验收全过程记录在 [`reports/A3_BUILD_AND_LIMITS.md`](reports/A3_BUILD_AND_LIMITS.md)（按轮次，含每轮真机探针证据与遗留限制）。
+- 诊断：Zotero 的 Run JavaScript 里执行 `FigureColorPlugin.probeAll()`，返回各 reader 会话的就绪状态、文档指纹、realm 归属、画布来源戳与警告日志。
+
+## 目录
+
+```text
+bootstrap.js            XPI 引导（chrome sandbox）
+manifest.json           插件清单（版本、兼容性）
+src/core/               检测器、区域缓存、绘制辅助（与 Zotero 无关）
+src/zotero/             reader 会话、覆盖层、探针、Notifier 接线
+scripts/                离线检查与 pdf.js 实验脚本（构建脚本 build.mjs）
+tests/js/               node:test 全量用例
+tests/*.py              交接包结构检查（Python）
+fixture/                PipeBWrite 测试 PDF 的参考数据（PDF/PNG 不入库）
+docs/                   初始规范与决策记录（Stage A/B 交接包）
+reports/                检测基线、阶段报告、逐轮开发日志
+```
+
+## 已知限制
+
+- 检测规则按学术 PDF 的常见图表形态调校（矢量路径、Form XObject、双栏排版）；纯位图扫描件与特殊着色方式未覆盖。
+- 图注（caption）与图的分离、并排小图的独立分带等边界情形在 backlog 中，见 `reports/A3_BUILD_AND_LIMITS.md` 各轮「遗留限制」。
+- 真机验证环境为 Zotero 10.0.8 / Windows；Zotero 大版本升级后 pdf.js 内部结构可能变化，探针字段是排查入口。
