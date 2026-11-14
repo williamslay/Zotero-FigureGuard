@@ -795,8 +795,13 @@ describe("reader session: fresh-open paint gaps", () => {
       await timers.fireNext();
       assert.equal(session.documentId, "fcp:printed-2");
       // The key carries the reader's scope, so a swap in one reader cannot wipe the
-      // cache entries another reader is still using.
-      assert.deepEqual(invalidated, ["item:523|fcp:printed-2"], "a printed-to-printed swap invalidates, as before");
+      // cache entries another reader is still using, and it names the document whose
+      // regions were cached — the one held before the swap, not the one just adopted.
+      assert.deepEqual(
+        invalidated,
+        ["item:523|fcp:printed-1"],
+        "a printed-to-printed swap invalidates the key held before the swap",
+      );
       assert.equal(detached.n, 1, "and it drops the pages of the closed document");
       assert.equal(repainted.n, 1, "and it repaints the new one");
 

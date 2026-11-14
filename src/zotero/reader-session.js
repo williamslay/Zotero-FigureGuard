@@ -715,6 +715,20 @@ export class ReaderSession {
      * @type {boolean}
      */
     this.noBusWarned = false;
+    /**
+     * What the last identity validation decided, for `probeAll()`: the wake that
+     * asked, the decision of `ensureCurrentDocument()`, the document identity left
+     * behind, and the time. Written by the validation alone, read by nobody, so it
+     * cannot change behaviour.
+     * @type {{trigger: string, decision: string, after: string|null, at: string}|null}
+     */
+    this.lastValidation = null;
+    /**
+     * The scoped cache key the last re-key released, so a report can name the
+     * document whose regions were dropped. Plain string.
+     * @type {string|null}
+     */
+    this.lastStaleKey = null;
 
     // Arrow handlers so the event bus can keep its own references.
     this.onDocumentEvent = () => this.queueDocumentCheck();
@@ -875,9 +889,10 @@ export class ReaderSession {
       // latched, even on a pass that found the realm it already held: the realm was
       // resolved from a stale reader chain that pointed at the other tab's viewer.
       // Corrected before the branches below, so a drift does not stop recovery and
-      // a ready session heals its paint on the pass that finds the drift.
-      const drift = this.docIdentityDrift();
-      if (drift) this.applyDocDrift(drift);
+      // a ready session heals its paint on the pass that finds the drift. The pass
+      // keeps its own guess budget afterwards: a `wait` here only means this pass
+      // painted nothing, and the loop below is what re-tries it.
+      this.ensureCurrentDocument("recovery");
       if (!this.currentPDFDocument()) return false;
       // A document on its own is not a ready session. With no bus there is no
       // `pagerendered` subscription, so the pages that arrive after this single
@@ -923,40 +938,22 @@ export class ReaderSession {
   }
 
   /**
-   /**
-    * Wakes the session after its tab became the visible one.
-    *
-    * Three independent things happen here. The realm is re-resolved, because a
-    * session that latched onto the other reader's realm during recovery paints the
-    * visible page of the hidden document, which is exactly what a two-tab session
-    * shows: `resolveInnerWindow()` returns the realm of *this* reader, so
-    * re-resolving adopts only a genuine change and the same realm again costs
-    * nothing but one counter read. The document sweep is re-armed, because a
-    * document that finished loading while the tab was in the background is otherwise
-    * never picked up: the `pagesloaded` event of a hidden reader is the one event the
-    * session may have missed while its realm was unresolved. And the document
-    * identity is re-derived, because the realm can stay the same while the key the
-    * session latched at startup belongs to the other tab's document — a drift
-    * `applyDocumentId()` never reports, since the live document already answers with
-    * the fresh key.
-    */
+   * Wakes the session after its tab became the visible one.
+   *
+   * The wake is the moment the newly visible document can be told apart from the
+   * one this session latched, so it goes through `ensureCurrentDocument()`: that
+   * re-resolves the realm (a session that latched onto the other reader's realm
+   * paints the visible page of the hidden document), re-derives the document
+   * identity from whatever realm is held afterwards, and releases the cache key and
+   * the overlays of the document that is no longer shown. `queueDocumentCheck()`
+   * stays behind it: the sweep picks up a document that finishes loading while the
+   * tab is in the background, which the validation above cannot see because the
+   * document was not there yet.
+   */
   onTabActivate() {
     if (this.destroyed) return;
-    // The realm first: at startup the bridge handed this reader the *other* tab's
-    // `PDFViewerApplication` while its own realm was unresolvable, so the latched
-    // `documentId` belongs to the wrong document. Re-resolving the realm and
-    // re-deriving the document id is the only way the hidden tab's session learns
-    // that the document it paints stopped being its own; `queueDocumentCheck()`
-    // alone would keep sweeping under the stale key.
-    this.reevaluateRealm();
+    this.ensureCurrentDocument("tab-activate");
     this.queueDocumentCheck();
-    // The document identity can drift under a realm that did not change: the realm
-    // this reader points at now is the one it already holds, while the document the
-    // latched key was minted from has been replaced by the one this tab shows.
-    // `queueDocumentCheck()` cannot see that — `applyDocumentId()` re-keys from the
-    // *live* document, which already answers with the fresh id.
-    const drift = this.docIdentityDrift();
-    if (drift) this.applyDocDrift(drift);
   }
 
   /**
@@ -997,24 +994,109 @@ export class ReaderSession {
   }
 
   /**
-   * Re-keys the session onto the document its live viewer actually shows.
+   * Re-keys the session onto a document identity a caller already read: the named
+   * manual entry of the repair route, for a Run-Javascript fix or a diagnostic that
+   * holds the fresh key and wants the pages and cache released in one call.
    *
-   * The stale cache entries have to go under the *old* key, before the fresh one is
-   * installed: after the assignment `cacheKey()` names the new document, and the
-   * regions the session parsed from the wrong one would stay in the shared cache
-   * forever. The overlays are dropped rather than re-positioned, because every
-   * canvas on them was painted from the wrong document's regions.
+   * No wake calls it any more. `ensureCurrentDocument()` owns the decision of when a
+   * document changed, and `commitRekey()` is the half that releases the previous
+   * document, so keeping a second decision point here would put the identity logic
+   * back in two places.
    *
    * @param {string} freshId Printed key of the live document, from `docIdentityDrift()`.
    * @returns {void}
    */
   applyDocDrift(freshId) {
     if (this.destroyed || !freshId) return;
-    // The key is assigned directly: `applyDocumentId()` would read the fresh id as
-    // "same" or silently adopt it, and this pass has to wipe what the wrong
-    // document cached.
-    this.regionCache.invalidateDocument(this.cacheKey());
+    this.commitRekey(freshId, "drift");
+  }
+
+  /**
+   * Whether the realm this session paints is proven to be this reader's own.
+   *
+   * A realm named by the reader's chain, its `src` match or its frame scan is its
+   * own; so is a guess whose budget was spent and accepted, and any window the
+   * reader's own chain or iframe set still lists. Only the last-resort bridge guess
+   * with budget left is still a guess: its document can belong to the other tab's
+   * viewer, and comparing that document against this session's key proves nothing.
+   *
+   * @returns {boolean}
+   */
+  realmUnproven() {
+    if (!this.innerWin) return true;
+    if (this.realmConfirmed()) return false;
+    return this.realmProvenance === "bridge" && this.bridgeGuessPasses < BRIDGE_GUESS_PASSES;
+  }
+
+  /**
+   * Decides what a document identity that no longer matches the latched one costs.
+   *
+   * The single place that compares the latched key against the identity the live
+   * document prints. `docIdentityDrift()` is the read: it reports a fresh key only
+   * for a realm the session trusts and only printed-against-printed, so a
+   * re-minted provisional key cannot turn this into a re-key loop, and the silent
+   * provisional-to-printed adoption stays with `applyDocumentId()`.
+   *
+   * @param {string} trigger Site asking, recorded for diagnostics.
+   * @returns {"ok"|"rekeyed"|"wait"} `wait` means the identity is unproven: the
+   *   caller must neither paint nor drop anything.
+   */
+  validateDocumentIdentity(trigger) {
+    if (this.destroyed) return "wait";
+    if (!this.documentId) return this.recordValidation(trigger, "ok");
+    const fresh = this.docIdentityDrift();
+    if (!fresh) return this.recordValidation(trigger, "ok");
+    if (this.realmUnproven()) {
+      // Fail-safe: nothing is painted and nothing is dropped. A guessed realm that
+      // is about to be replaced must not have this reader's own regions invalidated
+      // because the foreign window printed another fingerprint.
+      return this.recordValidation(trigger, "wait");
+    }
+    this.commitRekey(fresh, trigger);
+    return this.recordValidation(trigger, "rekeyed");
+  }
+
+  /**
+   * The one entry every wake goes through before it reads the cache, paints or
+   * re-keys: make sure the realm is the one this reader shows, then make sure the
+   * document identity the session holds is the identity of that realm's document.
+   *
+   * Order matters, and it is the whole bug. Identity is printed by the document
+   * object, the document object is reached through the realm, so a wake that skips
+   * the realm step compares the new document against a realm that still answers with
+   * the old one — and reads "same document" out of the other tab's viewer.
+   *
+   * @param {string} [trigger] Name of the wake, recorded for `probeAll()`.
+   * @returns {"ok"|"rekeyed"|"wait"} `wait` means the caller must paint nothing.
+   */
+  ensureCurrentDocument(trigger = "wake") {
+    if (this.destroyed) return "wait";
+    // Always re-resolve: the reader's own viewer appears late after a tab restore or
+    // a panel re-create, and `reevaluateRealm()` adopts only a genuine change, so a
+    // wake over an unchanged realm costs one resolution and no repaint.
+    this.reevaluateRealm();
+    return this.validateDocumentIdentity(trigger);
+  }
+
+  /**
+   * Moves the session onto a new document identity and releases everything that
+   * belonged to the previous one: the cached regions of the old key, the overlays
+   * that carry the old key's regions, and their paint.
+   *
+   * The stale entries go out under the *old* key, before the fresh one is installed:
+   * after the assignment `cacheKey()` names the new document, and the regions parsed
+   * from the wrong one would stay in the shared cache for the whole plugin run.
+   *
+   * @param {string} freshId Printed key of the document the realm shows now.
+   * @param {string} [trigger] Wake that asked, recorded for diagnostics.
+   * @returns {void}
+   */
+  commitRekey(freshId, trigger = "manual") {
+    if (this.destroyed || !freshId || freshId === this.documentId) return;
+    const staleKey = this.cacheKey();
     this.documentId = freshId;
+    this.regionCache.invalidateDocument(staleKey);
+    this.lastStaleKey = staleKey;
     this.detachAll();
     void this.repaintAttached();
     // Same race as a document swap: the canvases this pass rebuilds can land while
@@ -1026,6 +1108,51 @@ export class ReaderSession {
       this.tag,
     );
     this.notify();
+  }
+
+  /**
+   * Records what the last identity validation decided, for `probeAll()`.
+   *
+   * @param {string} trigger Site asking for the validation.
+   * @param {"ok"|"rekeyed"|"wait"} decision What the validation concluded.
+   * @returns {string} The decision, so callers can return it through one expression.
+   */
+  recordValidation(trigger, decision) {
+    this.lastValidation = {
+      trigger: String(trigger ?? "wake"),
+      decision,
+      // The identity the session holds after the validation, so a report says both
+      // what the wake decided and what document it left the reader on. For
+      // `rekeyed` this is the fresh key, since `commitRekey()` ran first.
+      after: this.documentId ?? null,
+      at: new Date().toISOString(),
+    };
+    return decision;
+  }
+
+  /**
+   * Re-stamps one overlay with the identity this session holds now.
+   *
+   * The viewer rebuilds a page view on a zoom, a toolbar toggle and a tab switch,
+   * and the session reuses the overlay record for the live view. Without this, the
+   * record a page got while document A was loaded keeps reading A's cached regions
+   * and keeps its `painted` flag after the window started showing document B, which
+   * is how the other document's boxes come back on every repaint.
+   *
+   * @param {PageOverlay} overlay
+   * @returns {void}
+   */
+  restampOverlay(overlay) {
+    if (!overlay) return;
+    overlay.docId = this.documentId ?? null;
+    const key = this.cacheKey();
+    if (overlay.documentId === key) return;
+    overlay.documentId = key;
+    // The mounted boxes were parsed for the previous document: drop them, plus the
+    // "already detected" flag, so the next paint reads the cache of the document the
+    // overlay is stamped with now.
+    overlay.painted = false;
+    overlay.regionBoxes = [];
   }
 
   /**
@@ -1055,11 +1182,16 @@ export class ReaderSession {
     const previous = this.innerWin;
     this.adoptRealm(resolution);
     this.realmSwitches += 1;
-    // The realm this session paints changed, so the overlays carry the old realm's
-    // window and the wrong document's regions; the repaint rebuilds them.
-    this.detachAll();
-    void this.repaintAttached();
-    this.notify();
+    // Identity is a property of the realm it was read from, so adopting another realm
+    // makes the latched key foreign: the new realm's document is a different
+    // document, and the overlays carry the old realm's window either way. The
+    // decision of what that costs stays in one place — `validateDocumentIdentity()`
+    // — and a re-key there already detaches, repaints and notifies.
+    if (this.validateDocumentIdentity("realm-adopted") !== "rekeyed") {
+      this.detachAll();
+      void this.repaintAttached();
+      this.notify();
+    }
     warnOnce(
       "realm-switched",
       new Error("session moved to another pdf.js realm"),
@@ -1181,11 +1313,6 @@ export class ReaderSession {
         this.visHandler = () => {
           if (this.innerWin?.document === realmDocument && realmDocument.visibilityState === "hidden") return;
           this.onTabActivate();
-          // Same safety net as the realm re-evaluation: a visibility flip is the
-          // other moment the newly visible document can differ from the one this
-          // session latched, and the notifier above may not have fired at all.
-          const drift = this.docIdentityDrift();
-          if (drift) this.applyDocDrift(drift);
         };
       }
       try {
@@ -1308,19 +1435,20 @@ export class ReaderSession {
     const run = () => {
       this.documentCheckTimer = null;
       this.timers.delete(timer);
+      // Identity goes through the one entry before anything is read or painted: the
+      // realm this window answers with can have been replaced while the sweep waited,
+      // and a drift has to release the previous key and the mounted pages before this
+      // pass reads the live document. A `rekeyed` sweep already detached, repainted
+      // and re-armed the settled check; a `wait` paints nothing rather than painting
+      // an unproven realm's regions under this reader's key.
+      if (this.ensureCurrentDocument("document-check") !== "ok") return;
       const pdfDocument = this.currentPDFDocument();
-      const latched = this.documentId;
+      // Read before `applyDocumentId()`: after a swap `cacheKey()` names the new
+      // document, and invalidating that leaves the regions parsed from the previous
+      // one in the shared cache for the whole plugin run.
+      const staleKey = this.cacheKey();
       const decision = this.applyDocumentId(resolveDocumentId(pdfDocument));
       if (decision !== "changed") {
-        // The document can have been re-keyed under a *different* printed identity
-        // than the one this session latched — the realm that resolved to the other
-        // tab's viewer at startup. `applyDocumentId()` reads that as "same", because
-        // it re-keys from the live document, which already carries the fresh id.
-        const drift = this.docIdentityDrift();
-        if (drift && drift !== latched) {
-          this.applyDocDrift(drift);
-          return;
-        }
         if (!pdfDocument && this.documentId) {
           this.documentId = null;
           this.detachAll();
@@ -1331,7 +1459,7 @@ export class ReaderSession {
         this.catchUpPaint("pagesloaded");
         return;
       }
-      this.regionCache.invalidateDocument(this.cacheKey());
+      this.regionCache.invalidateDocument(staleKey);
       this.detachAll();
       void this.repaintAttached();
       // The same race as the first open and the same reason: with a warm
@@ -1523,13 +1651,16 @@ export class ReaderSession {
       // the record is rebound to the live view and the paint remounts them.
       overlay.pageView = pageView;
       overlay.innerWin = this.innerWin;
-      // The canvases are re-appended under this document, so the provenance they
-      // get from now on has to name it too.
-      overlay.docId = this.documentId ?? null;
+      // The canvases are re-appended under whatever this session shows now, so the
+      // record has to be re-stamped with it: a record that kept the previous
+      // document's key keeps reading that document's cached regions, which is how the
+      // other document's boxes come back on every repaint.
+      this.restampOverlay(overlay);
     } else if (overlay.isMounted && !overlay.isMounted()) {
       // Same page view, canvases gone: the div they hung in left the DOM. Repaint
       // re-appends them, which is what makes the page visible again.
       overlay.innerWin = this.innerWin;
+      this.restampOverlay(overlay);
     }
     return this.track(overlay, this.paintOverlay(overlay));
   }
@@ -1550,6 +1681,14 @@ export class ReaderSession {
     if (!detected) return;
     if (this.destroyed || !this.enabled || this.overlays.get(overlay.pageNumber) !== overlay) {
       // Stale job: drop whatever the overlay mounted instead of adding more.
+      overlay.clear();
+      return;
+    }
+    if (overlay.documentId !== this.cacheKey()) {
+      // The regions were read — or cached — for the document the overlay was stamped
+      // with, and the identity changed while detection was in flight. Painting them now
+      // would mount the previous document's boxes on the new one, where they stay
+      // because the next paint reads them back as this page's regions.
       overlay.clear();
       return;
     }
@@ -1577,9 +1716,19 @@ export class ReaderSession {
    */
   onViewScaleChange() {
     if (!this.enabled || this.destroyed) return;
+    // A zoom is a repaint, so it reads the cache like every other paint: the boxes
+    // this method reuses were parsed for the document the overlay was stamped with,
+    // and a wake that finds another document has to say so before they are re-used.
+    if (this.ensureCurrentDocument("scale-change") !== "ok") return;
+    const key = this.cacheKey();
     const jobs = [];
     for (const overlay of [...this.overlays.values()]) {
       if (!overlay || overlay.destroyed) continue;
+      if (overlay.documentId !== key) {
+        // The mounted boxes belong to another document: drop them and let the paint
+        // below re-detect under this one, instead of re-positioning foreign boxes.
+        this.restampOverlay(overlay);
+      }
       // Keep the cached regions, but drop the "already painted" assumption for
       // pages that have not been rendered at the new scale yet.
       const boxes = overlay.regionBoxes.length ? overlay.regionBoxes : null;
@@ -1627,10 +1776,16 @@ export class ReaderSession {
     if (this.destroyed) return value;
     if (!value) this.detachAll();
     else {
-      void this.repaintAttached();
-      // The paint above runs in the same tick as the toolbar state change, so
-      // schedule the correction pass for after the viewer finishes relayouting.
-      this.scheduleSettledCheck();
+      // The toggle repaints every page, so it goes through the same entry as the
+      // other wakes: a session that still holds the previous document's identity must
+      // not read its regions back from the cache and mount them again. A `rekeyed`
+      // wake already repainted, and a `wait` paints nothing on purpose.
+      if (this.ensureCurrentDocument("enable") === "ok") {
+        void this.repaintAttached();
+        // The paint above runs in the same tick as the toolbar state change, so
+        // schedule the correction pass for after the viewer finishes relayouting.
+        this.scheduleSettledCheck();
+      }
     }
     this.notify();
     return value;

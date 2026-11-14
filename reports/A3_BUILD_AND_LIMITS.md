@@ -1315,3 +1315,44 @@ Image 一并裁剪并计入 `clippedCount`）；`flash-detect.test.mjs` +1（第
 ### 构建产物
 
 - `package.json` 与 `manifest.json` 同为 0.1.26；`npm run build` → `dist/figure-color-preservation-0.1.26.xpi`（47,155 字节）；较 0.1.25（45,702 字节）增 1,453 字节，全部来自 realm 出处/归属与缓存索引逻辑；`build/` 与 `dist/` 重新生成，未手改。
+
+## 第 27 轮：真机跨文档污染定案——统一文档身份验证入口 — v0.1.27
+
+### 真机证据（0.1.26，四次 probeAll 采样）
+
+- T1 item:316 健康：`docId == freshDocId == fcp:bd8e2cda…`，`realmId r1`，画布来源戳一致。
+- T2 切到 item:483，错误已现（off-on 之前）：`docId fcp:bd8e2cda…`（316 的），`freshDocId fcp:3e708112…`（自己的），`cacheKey item:483|fcp:bd8e2cda…`；p11 三条区域与 316 完全相同。
+- T3 off-on：区域不变，画布来源戳跳到第三个窗口（r3）；T4 缩放：仍不变。`wake {count:0}`。
+
+### 根因（详见 `reports/CROSS_DOCUMENT_BUG_ROOT_CAUSE.md`）
+
+`start()` 用未经归属证明的 realm 铸造 `documentId`；`adoptRealm()`/`reevaluateRealm()` 换窗口不换身份；`PageOverlay.detect()` 缓存命中直接画旧区域并置 `painted`；deck 切换不发任何能触发 re-key 的唤醒事件（notifier 计数 0、`visibilitychange` 不触发、总线无文档事件）；`queueDocumentCheck` 先改身份后用新 `cacheKey()` 失效——旧条目成孤儿，污染在每次 repaint 自我固化。检测层与指纹碰撞均排除（T2–T4 期间 B 根本没跑检测）。
+
+### 修复（`src/zotero/`，检测层零改动）
+
+1. **统一验证入口**（`reader-session.js`）：新增 `ensureCurrentDocument(trigger)`——先 `reevaluateRealm()`（realm 必须先于身份比较：文档身份经 realm 读出，跳过这步就是拿别人的 viewer 答「同一文档」），再 `validateDocumentIdentity(trigger)`。返回值 `"ok"|"rekeyed"|"wait"`，`wait` = realm 仍是未证实猜测，调用方不画也不清（fail-safe no-paint，猜测预算即自动恢复）。
+2. **旧键先存再切**（`reader-session.js`）：新 `commitRekey(freshId, trigger)` 在写入新身份前捕获 `staleKey = cacheKey()`，`invalidateDocument(staleKey)`，再 `detachAll`/`repaintAttached`/`scheduleSettledCheck`；`applyDocDrift()` 变薄壳转调 `commitRekey`，既有测试锚点保留。`queueDocumentCheck.run` 的「先改后失效」顺序 bug 一并消除。
+3. **唤醒全部接入**：`recoveryPass`（"recovery"）、`onTabActivate`（"tab-activate"）、`queueDocumentCheck`（"document-check"，非 `ok` 即返回）、`onViewScaleChange`（"scale-change"，同文档缩放仍复用 `regionBoxes` 零重检测；overlay 键不符先 `restampOverlay` 再重检测）、`setEnabled(true)`（"enable"）。无新定时器。
+4. **overlay 提交守卫**：`paintOverlay` await 后校验 `overlay.documentId === cacheKey()`，不符则 `overlay.clear()` 丢弃（晚到的检测/缓存结果不再画到换过的文档上）；`attachPageView` 重绑分支改 `restampOverlay`——新文档不再继承旧文档的 `docId`/已画状态。
+5. **探针补字段**（`main.js`，`describeSession`）：`lastValidation{trigger,decision,after,at}`（谁问的、判了什么、之后身份是什么）、`docIdStale`（docId ≠ freshDocId）、`lastStaleKey`/`staleKeyPresent`（旧键残留可见）、`realmUnproven`（true 且 docId 有值 = 故意停在「宁可不画」态）；`realmOwned` 注明语义为帧成员关系而非文档归属；`version` 改报 bootstrap 的安装版本（Run-JS 裸环境回落核心版本）。
+
+### 不动的东西（invariants）
+
+- `src/core/detector.js`/`detector-options.js` 零改动；`reports/*.json` 基线逐字节不变（`npm test` 强制）。
+- 无论文专用规则、无缓存全清、无固定等待；已确认 realm 的健康会话不付新代价。
+
+### 测试
+
+- 新增 `tests/js/cross-document.test.mjs`：13 条（唤醒 re-key、失效顺序、overlay 跨文档不继承、缩放守卫、异步晚到提交、同指纹双会话隔离）。修复前 5 RED（与根因一一对应：`documentId 'fcp:aaa' vs 'fcp:bbb'`、`invalidated [[新键]]`、`overlay.documentId` 旧键、`paintRegions` 拿旧框、`commits 1 vs 0`），修复后 13/13 GREEN。
+- 更新 `reader-session.test.mjs:799`（旧键失效语义）与 `cache.test.mjs`、`probe-all.test.mjs`（新字段断言）。
+- 全量 `npm test`：412 tests / 72 suites / **0 fail**（399 → 412）。
+
+### 遗留限制增补（待 Stage B 判断）
+
+- `realmUnproven: true` 的会话会「宁可不画」：若某 PDF 长期不画且该字段为 true，说明真机上 iframe 解析迟迟不成功——观察 `realmProvenance: "bridge"`。
+- T2 的确切采纳路由需下次采样看 `realmRoute`/`realmProvenance` 定论；r1/r2/r3 窗口身份系单次日志重建。
+- Mock 已覆盖 realm 切换与文档替换，但 Gecko 跨 realm wrapper 稳定性、deck 切换的真实唤醒路径仍只能真机验证（`reports/STAGE_B_CROSS_DOCUMENT_VERIFICATION.md`）。
+
+### 构建产物
+
+- `package.json` 与 `manifest.json` 同为 0.1.27；`npm run build` → `dist/figure-color-preservation-0.1.27.xpi`（49,597 字节）；`build/` 与 `dist/` 重新生成，未手改。

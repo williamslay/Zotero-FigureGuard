@@ -127,6 +127,27 @@ export class RegionCache {
     this.epoch.set(documentId, (this.epoch.get(documentId) ?? 0) + 1);
   }
 
+  /**
+   * Read-only question: does this document key still hold any cached page? Used
+   * by diagnostics to prove a released key really is empty, so it must not touch
+   * the recency order the way `get()` does.
+   *
+   * @param {string|number|null} documentId
+   * @returns {boolean}
+   */
+  hasDocument(documentId) {
+    const docKey = String(documentId);
+    const indexed = this.keysByDocument.get(docKey);
+    if (indexed?.size) return true;
+    // Same fallback as `invalidateDocument()`: an entry that predates the index is
+    // invisible to it, and reporting an empty key that still paints boxes would
+    // send a report down the wrong path.
+    for (const key of this.entries.keys()) {
+      if (key.startsWith(`${docKey}::`)) return true;
+    }
+    return false;
+  }
+
   clear() {
     this.entries.clear();
     this.epoch.clear();

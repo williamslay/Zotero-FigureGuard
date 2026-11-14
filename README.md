@@ -2,7 +2,7 @@
 
 Zotero 10 原生 PDF 阅读器的深色主题会把整页反色：文字变白是对的，彩色图表却跟着变成灰白轮廓。FigureGuard 自动识别页面里的图表区域，把这些区域恢复为 PDF 原始颜色，其余部分保持深色主题。不修改 PDF 文件，不依赖 Reading Mode，不改 Zotero 的排版。
 
-> 版本 0.1.26。插件 ID `figure-color-preservation@local`，兼容 Zotero 7–10（真机验证：Zotero 10.0.8 / Windows）。
+> 版本 0.1.27。插件 ID `figure-color-preservation@local`，兼容 Zotero 7–10（真机验证：Zotero 10.0.8 / Windows）。
 
 ## 它做什么
 
@@ -21,7 +21,7 @@ Zotero 10 原生 PDF 阅读器的深色主题会把整页反色：文字变白�
 
 ```bash
 npm install
-npm run build   # → dist/figure-color-preservation-0.1.26.xpi
+npm run build   # → dist/figure-color-preservation-0.1.27.xpi
 ```
 
 ## 工作原理（简）
@@ -40,7 +40,7 @@ npm run build   # → dist/ 下打包 xpi
 
 - 检测基线：`reports/*-detection.json`（PipeBWrite 18 区、FluidKV 18 区、Flash 10 区、Borges 9 区），任何检测层改动若移动这些矩形，测试直接失败。
 - 开发与验收全过程记录在 [`reports/A3_BUILD_AND_LIMITS.md`](reports/A3_BUILD_AND_LIMITS.md)（按轮次，含每轮真机探针证据与遗留限制）。
-- 诊断：Zotero 的 Run JavaScript 里执行 `FigureColorPlugin.probeAll()`，返回各 reader 会话的就绪状态、文档指纹、realm 归属、画布来源戳与警告日志。
+- 诊断：Zotero 的 Run JavaScript 里执行 `FigureColorPlugin.probeAll()`，返回各 reader 会话的就绪状态、文档指纹、realm 归属、画布来源戳、身份校验判定（`lastValidation`、`docIdStale`、`lastStaleKey`、`staleKeyPresent`）与警告日志。顶层 `version` 是已安装插件的版本（取自 `manifest.json`），核心构建号见 `coreVersion`。
 
 ## 目录
 

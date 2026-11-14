@@ -1,6 +1,6 @@
 {
   "name": "zotero-figure-color-preservation",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "private": true,
   "description": "Stage A harness and source for the Zotero Figure Color Preservation plugin",
   "type": "module",

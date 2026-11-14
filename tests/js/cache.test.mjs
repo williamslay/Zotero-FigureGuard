@@ -44,6 +44,8 @@ describe("cache: regions", () => {
     assert.equal(cache.get("doc-a", 0), null);
     assert.equal(cache.get("doc-a", 1), null);
     assert.equal(cache.get("doc-b", 0), 3);
+    assert.equal(cache.hasDocument("doc-a"), false, "an invalidated key holds nothing");
+    assert.equal(cache.hasDocument("doc-b"), true, "the other document's pages are still there");
   });
 
   it("makes tokens from before an invalidation stale", () => {
@@ -112,8 +114,10 @@ describe("cache: per-reader scope", () => {
     const cache = new RegionCache();
     // An entry written before the index existed: in `entries`, absent from `keysByDocument`.
     cache.entries.set(RegionCache.key("doc-legacy", 2), { value: "old", generation: 0 });
+    assert.equal(cache.hasDocument("doc-legacy"), true, "the read-only question sees an unindexed entry too");
     cache.invalidateDocument("doc-legacy");
     assert.equal(cache.get("doc-legacy", 2), null, "the fallback pass deletes what the index never knew about");
+    assert.equal(cache.hasDocument("doc-legacy"), false, "and the key reports empty afterwards");
   });
 
   it("stalems only the invalidated document's in-flight tokens", () => {

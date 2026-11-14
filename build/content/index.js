@@ -1696,6 +1696,23 @@ var FigureColorPlugin = (() => {
       }
       this.epoch.set(documentId, (this.epoch.get(documentId) ?? 0) + 1);
     }
+    /**
+     * Read-only question: does this document key still hold any cached page? Used
+     * by diagnostics to prove a released key really is empty, so it must not touch
+     * the recency order the way `get()` does.
+     *
+     * @param {string|number|null} documentId
+     * @returns {boolean}
+     */
+    hasDocument(documentId) {
+      const docKey = String(documentId);
+      const indexed = this.keysByDocument.get(docKey);
+      if (indexed?.size) return true;
+      for (const key of this.entries.keys()) {
+        if (key.startsWith(`${docKey}::`)) return true;
+      }
+      return false;
+    }
     clear() {
       this.entries.clear();
       this.epoch.clear();
@@ -3282,6 +3299,8 @@ var FigureColorPlugin = (() => {
       this.catchUpDone = /* @__PURE__ */ new Set();
       this.documentIdAdopted = false;
       this.noBusWarned = false;
+      this.lastValidation = null;
+      this.lastStaleKey = null;
       this.onDocumentEvent = () => this.queueDocumentCheck();
       this.onPageRenderedEvent = (event) => {
         try {
@@ -3398,8 +3417,7 @@ var FigureColorPlugin = (() => {
           this.eventBus = resolveEventBus(this.innerWin, this.tag);
           if (this.eventBus) this.bindEvents();
         }
-        const drift = this.docIdentityDrift();
-        if (drift) this.applyDocDrift(drift);
+        this.ensureCurrentDocument("recovery");
         if (!this.currentPDFDocument()) return false;
         if (!this.eventBus) {
           this.syncDocumentId();
@@ -3427,29 +3445,22 @@ var FigureColorPlugin = (() => {
       }
     }
     /**
-     /**
-      * Wakes the session after its tab became the visible one.
-      *
-      * Three independent things happen here. The realm is re-resolved, because a
-      * session that latched onto the other reader's realm during recovery paints the
-      * visible page of the hidden document, which is exactly what a two-tab session
-      * shows: `resolveInnerWindow()` returns the realm of *this* reader, so
-      * re-resolving adopts only a genuine change and the same realm again costs
-      * nothing but one counter read. The document sweep is re-armed, because a
-      * document that finished loading while the tab was in the background is otherwise
-      * never picked up: the `pagesloaded` event of a hidden reader is the one event the
-      * session may have missed while its realm was unresolved. And the document
-      * identity is re-derived, because the realm can stay the same while the key the
-      * session latched at startup belongs to the other tab's document — a drift
-      * `applyDocumentId()` never reports, since the live document already answers with
-      * the fresh key.
-      */
+     * Wakes the session after its tab became the visible one.
+     *
+     * The wake is the moment the newly visible document can be told apart from the
+     * one this session latched, so it goes through `ensureCurrentDocument()`: that
+     * re-resolves the realm (a session that latched onto the other reader's realm
+     * paints the visible page of the hidden document), re-derives the document
+     * identity from whatever realm is held afterwards, and releases the cache key and
+     * the overlays of the document that is no longer shown. `queueDocumentCheck()`
+     * stays behind it: the sweep picks up a document that finishes loading while the
+     * tab is in the background, which the validation above cannot see because the
+     * document was not there yet.
+     */
     onTabActivate() {
       if (this.destroyed) return;
-      this.reevaluateRealm();
+      this.ensureCurrentDocument("tab-activate");
       this.queueDocumentCheck();
-      const drift = this.docIdentityDrift();
-      if (drift) this.applyDocDrift(drift);
     }
     /**
      * The document this reader's live viewer shows, when its printed identity is not
@@ -3479,21 +3490,99 @@ var FigureColorPlugin = (() => {
       }
     }
     /**
-     * Re-keys the session onto the document its live viewer actually shows.
+     * Re-keys the session onto a document identity a caller already read: the named
+     * manual entry of the repair route, for a Run-Javascript fix or a diagnostic that
+     * holds the fresh key and wants the pages and cache released in one call.
      *
-     * The stale cache entries have to go under the *old* key, before the fresh one is
-     * installed: after the assignment `cacheKey()` names the new document, and the
-     * regions the session parsed from the wrong one would stay in the shared cache
-     * forever. The overlays are dropped rather than re-positioned, because every
-     * canvas on them was painted from the wrong document's regions.
+     * No wake calls it any more. `ensureCurrentDocument()` owns the decision of when a
+     * document changed, and `commitRekey()` is the half that releases the previous
+     * document, so keeping a second decision point here would put the identity logic
+     * back in two places.
      *
      * @param {string} freshId Printed key of the live document, from `docIdentityDrift()`.
      * @returns {void}
      */
     applyDocDrift(freshId) {
       if (this.destroyed || !freshId) return;
-      this.regionCache.invalidateDocument(this.cacheKey());
+      this.commitRekey(freshId, "drift");
+    }
+    /**
+     * Whether the realm this session paints is proven to be this reader's own.
+     *
+     * A realm named by the reader's chain, its `src` match or its frame scan is its
+     * own; so is a guess whose budget was spent and accepted, and any window the
+     * reader's own chain or iframe set still lists. Only the last-resort bridge guess
+     * with budget left is still a guess: its document can belong to the other tab's
+     * viewer, and comparing that document against this session's key proves nothing.
+     *
+     * @returns {boolean}
+     */
+    realmUnproven() {
+      if (!this.innerWin) return true;
+      if (this.realmConfirmed()) return false;
+      return this.realmProvenance === "bridge" && this.bridgeGuessPasses < BRIDGE_GUESS_PASSES;
+    }
+    /**
+     * Decides what a document identity that no longer matches the latched one costs.
+     *
+     * The single place that compares the latched key against the identity the live
+     * document prints. `docIdentityDrift()` is the read: it reports a fresh key only
+     * for a realm the session trusts and only printed-against-printed, so a
+     * re-minted provisional key cannot turn this into a re-key loop, and the silent
+     * provisional-to-printed adoption stays with `applyDocumentId()`.
+     *
+     * @param {string} trigger Site asking, recorded for diagnostics.
+     * @returns {"ok"|"rekeyed"|"wait"} `wait` means the identity is unproven: the
+     *   caller must neither paint nor drop anything.
+     */
+    validateDocumentIdentity(trigger) {
+      if (this.destroyed) return "wait";
+      if (!this.documentId) return this.recordValidation(trigger, "ok");
+      const fresh = this.docIdentityDrift();
+      if (!fresh) return this.recordValidation(trigger, "ok");
+      if (this.realmUnproven()) {
+        return this.recordValidation(trigger, "wait");
+      }
+      this.commitRekey(fresh, trigger);
+      return this.recordValidation(trigger, "rekeyed");
+    }
+    /**
+     * The one entry every wake goes through before it reads the cache, paints or
+     * re-keys: make sure the realm is the one this reader shows, then make sure the
+     * document identity the session holds is the identity of that realm's document.
+     *
+     * Order matters, and it is the whole bug. Identity is printed by the document
+     * object, the document object is reached through the realm, so a wake that skips
+     * the realm step compares the new document against a realm that still answers with
+     * the old one — and reads "same document" out of the other tab's viewer.
+     *
+     * @param {string} [trigger] Name of the wake, recorded for `probeAll()`.
+     * @returns {"ok"|"rekeyed"|"wait"} `wait` means the caller must paint nothing.
+     */
+    ensureCurrentDocument(trigger = "wake") {
+      if (this.destroyed) return "wait";
+      this.reevaluateRealm();
+      return this.validateDocumentIdentity(trigger);
+    }
+    /**
+     * Moves the session onto a new document identity and releases everything that
+     * belonged to the previous one: the cached regions of the old key, the overlays
+     * that carry the old key's regions, and their paint.
+     *
+     * The stale entries go out under the *old* key, before the fresh one is installed:
+     * after the assignment `cacheKey()` names the new document, and the regions parsed
+     * from the wrong one would stay in the shared cache for the whole plugin run.
+     *
+     * @param {string} freshId Printed key of the document the realm shows now.
+     * @param {string} [trigger] Wake that asked, recorded for diagnostics.
+     * @returns {void}
+     */
+    commitRekey(freshId, trigger = "manual") {
+      if (this.destroyed || !freshId || freshId === this.documentId) return;
+      const staleKey = this.cacheKey();
       this.documentId = freshId;
+      this.regionCache.invalidateDocument(staleKey);
+      this.lastStaleKey = staleKey;
       this.detachAll();
       void this.repaintAttached();
       this.scheduleSettledCheck();
@@ -3503,6 +3592,46 @@ var FigureColorPlugin = (() => {
         this.tag
       );
       this.notify();
+    }
+    /**
+     * Records what the last identity validation decided, for `probeAll()`.
+     *
+     * @param {string} trigger Site asking for the validation.
+     * @param {"ok"|"rekeyed"|"wait"} decision What the validation concluded.
+     * @returns {string} The decision, so callers can return it through one expression.
+     */
+    recordValidation(trigger, decision) {
+      this.lastValidation = {
+        trigger: String(trigger ?? "wake"),
+        decision,
+        // The identity the session holds after the validation, so a report says both
+        // what the wake decided and what document it left the reader on. For
+        // `rekeyed` this is the fresh key, since `commitRekey()` ran first.
+        after: this.documentId ?? null,
+        at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      return decision;
+    }
+    /**
+     * Re-stamps one overlay with the identity this session holds now.
+     *
+     * The viewer rebuilds a page view on a zoom, a toolbar toggle and a tab switch,
+     * and the session reuses the overlay record for the live view. Without this, the
+     * record a page got while document A was loaded keeps reading A's cached regions
+     * and keeps its `painted` flag after the window started showing document B, which
+     * is how the other document's boxes come back on every repaint.
+     *
+     * @param {PageOverlay} overlay
+     * @returns {void}
+     */
+    restampOverlay(overlay) {
+      if (!overlay) return;
+      overlay.docId = this.documentId ?? null;
+      const key = this.cacheKey();
+      if (overlay.documentId === key) return;
+      overlay.documentId = key;
+      overlay.painted = false;
+      overlay.regionBoxes = [];
     }
     /**
      * Adopts the pdf.js realm this reader points at now, when it is not the one the
@@ -3525,9 +3654,11 @@ var FigureColorPlugin = (() => {
       const previous = this.innerWin;
       this.adoptRealm(resolution);
       this.realmSwitches += 1;
-      this.detachAll();
-      void this.repaintAttached();
-      this.notify();
+      if (this.validateDocumentIdentity("realm-adopted") !== "rekeyed") {
+        this.detachAll();
+        void this.repaintAttached();
+        this.notify();
+      }
       warnOnce(
         "realm-switched",
         new Error("session moved to another pdf.js realm"),
@@ -3634,8 +3765,6 @@ var FigureColorPlugin = (() => {
           this.visHandler = () => {
             if (this.innerWin?.document === realmDocument && realmDocument.visibilityState === "hidden") return;
             this.onTabActivate();
-            const drift = this.docIdentityDrift();
-            if (drift) this.applyDocDrift(drift);
           };
         }
         try {
@@ -3739,15 +3868,11 @@ var FigureColorPlugin = (() => {
       const run = () => {
         this.documentCheckTimer = null;
         this.timers.delete(timer);
+        if (this.ensureCurrentDocument("document-check") !== "ok") return;
         const pdfDocument = this.currentPDFDocument();
-        const latched = this.documentId;
+        const staleKey = this.cacheKey();
         const decision = this.applyDocumentId(resolveDocumentId(pdfDocument));
         if (decision !== "changed") {
-          const drift = this.docIdentityDrift();
-          if (drift && drift !== latched) {
-            this.applyDocDrift(drift);
-            return;
-          }
           if (!pdfDocument && this.documentId) {
             this.documentId = null;
             this.detachAll();
@@ -3755,7 +3880,7 @@ var FigureColorPlugin = (() => {
           this.catchUpPaint("pagesloaded");
           return;
         }
-        this.regionCache.invalidateDocument(this.cacheKey());
+        this.regionCache.invalidateDocument(staleKey);
         this.detachAll();
         void this.repaintAttached();
         this.scheduleSettledCheck();
@@ -3926,9 +4051,10 @@ var FigureColorPlugin = (() => {
       } else if (overlay.pageView && overlay.pageView !== pageView) {
         overlay.pageView = pageView;
         overlay.innerWin = this.innerWin;
-        overlay.docId = this.documentId ?? null;
+        this.restampOverlay(overlay);
       } else if (overlay.isMounted && !overlay.isMounted()) {
         overlay.innerWin = this.innerWin;
+        this.restampOverlay(overlay);
       }
       return this.track(overlay, this.paintOverlay(overlay));
     }
@@ -3947,6 +4073,10 @@ var FigureColorPlugin = (() => {
       const detected = await overlay.detect();
       if (!detected) return;
       if (this.destroyed || !this.enabled || this.overlays.get(overlay.pageNumber) !== overlay) {
+        overlay.clear();
+        return;
+      }
+      if (overlay.documentId !== this.cacheKey()) {
         overlay.clear();
         return;
       }
@@ -3972,9 +4102,14 @@ var FigureColorPlugin = (() => {
      */
     onViewScaleChange() {
       if (!this.enabled || this.destroyed) return;
+      if (this.ensureCurrentDocument("scale-change") !== "ok") return;
+      const key = this.cacheKey();
       const jobs = [];
       for (const overlay of [...this.overlays.values()]) {
         if (!overlay || overlay.destroyed) continue;
+        if (overlay.documentId !== key) {
+          this.restampOverlay(overlay);
+        }
         const boxes = overlay.regionBoxes.length ? overlay.regionBoxes : null;
         const job = boxes ? this.track(overlay, overlay.paintRegions(boxes)) : this.track(overlay, this.paintOverlay(overlay));
         if (job) jobs.push(job);
@@ -4013,8 +4148,10 @@ var FigureColorPlugin = (() => {
       if (this.destroyed) return value;
       if (!value) this.detachAll();
       else {
-        void this.repaintAttached();
-        this.scheduleSettledCheck();
+        if (this.ensureCurrentDocument("enable") === "ok") {
+          void this.repaintAttached();
+          this.scheduleSettledCheck();
+        }
       }
       this.notify();
       return value;
@@ -4163,6 +4300,7 @@ var FigureColorPlugin = (() => {
   var registeredEventTypes = [];
   var zoteroNotifierId = null;
   var started = false;
+  var addonVersion = "";
   function getZotero() {
     try {
       if (globalThis.Zotero) return globalThis.Zotero;
@@ -4430,7 +4568,9 @@ var FigureColorPlugin = (() => {
       }
     }
     return {
-      version: CORE_VERSION,
+      // Same rule as `probeAll()`: the installed add-on version when the bootstrap
+      // supplied one, so no probe reports a build number that contradicts another.
+      version: addonVersion || CORE_VERSION,
       enabled,
       readers: sessions.size,
       documents: documents.size,
@@ -4505,6 +4645,7 @@ var FigureColorPlugin = (() => {
     try {
       if (started) return;
       started = true;
+      addonVersion = String(data?.version ?? "");
       regionCache = new RegionCache({ maxEntries: 256 });
       const zotero = getZotero();
       const readerAPI = zotero?.Reader ?? null;
@@ -4561,6 +4702,7 @@ var FigureColorPlugin = (() => {
   function shutdown() {
     try {
       started = false;
+      addonVersion = "";
       while (observers.length) removeWindowObserver(observers.pop());
       removeZoteroNotifier();
       const readerAPI = getZotero()?.Reader ?? null;
@@ -4731,10 +4873,12 @@ var FigureColorPlugin = (() => {
       // from `docId` says the correction is not landing on this machine.
       realmSwitches: Number(session.realmSwitches) || 0,
       // Where the latched realm came from (`chain`/`src`/`scan`/`bridge`/
-      // `bridge-guessed`/`none`) and whether it still belongs to this reader's
-      // own chain or iframe set: `bridge` with `realmOwned: false` is the
-      // cross-reader guess, kept visible so the probe proves the adoption gate
-      // is landing on the real machine.
+      // `bridge-guessed`/`none`) and whether the window is still listed by this
+      // reader's own chain or iframe set — frame membership, not document ownership:
+      // it says the realm belongs to this reader's frames, which does not by itself
+      // prove that the document inside it is the one this reader shows. `bridge` with
+      // `realmOwned: false` is the cross-reader guess, kept visible so the probe proves
+      // the adoption gate is landing on the real machine.
       realmProvenance: String(session.realmProvenance ?? "none"),
       realmOwned: (() => {
         try {
@@ -4743,7 +4887,46 @@ var FigureColorPlugin = (() => {
           return false;
         }
       })(),
+      // Whether the realm is still only a guess, so the identity read from it proves
+      // nothing and the wakes hold their paint: `true` with `docId` set is the state
+      // where the plugin deliberately paints nothing rather than the wrong document.
+      realmUnproven: (() => {
+        try {
+          return Boolean(session.realmUnproven?.());
+        } catch {
+          return true;
+        }
+      })(),
       documentIdAdopted: Boolean(session.documentIdAdopted),
+      // What the last wake through `ensureCurrentDocument()` decided — `{trigger,
+      // decision, after, at}` with `decision` in `ok`/`rekeyed`/`wait` and `after` the
+      // identity the wake left behind — plus the scoped cache key the last re-key
+      // released. Together they answer "did the wake see my document, and whose regions
+      // did it drop" without a code change.
+      lastValidation: session.lastValidation ?? null,
+      // True when the session's own drift read reports another document right now, so
+      // the next wake re-keys: a trusted realm, printed against printed. Provisional
+      // re-mints and unproven realms read false, exactly as the gate does.
+      docIdStale: (() => {
+        try {
+          return Boolean(session.docIdentityDrift?.());
+        } catch {
+          return false;
+        }
+      })(),
+      lastStaleKey: session.lastStaleKey ?? null,
+      // True when the key the last re-key released still holds cached regions, which
+      // would mean the previous document's regions are still readable by some session.
+      // `false` is the clean state the re-key is supposed to leave.
+      staleKeyPresent: (() => {
+        try {
+          const stale = session.lastStaleKey ?? null;
+          if (!stale) return false;
+          return Boolean(session.regionCache?.hasDocument?.(stale));
+        } catch {
+          return false;
+        }
+      })(),
       overlays: session.overlays?.size ?? 0,
       enabled: Boolean(session.enabled),
       currentPage: null,
@@ -4820,7 +5003,11 @@ var FigureColorPlugin = (() => {
     const active = resolveProbeTarget().session;
     const result = {
       at: (/* @__PURE__ */ new Date()).toISOString(),
-      version: CORE_VERSION,
+      // The installed add-on version the bootstrap reported, so a machine report proves
+      // which build is loaded; the core build stays visible in `coreVersion` for the
+      // harness cases that call `startup()` without version data.
+      version: addonVersion || CORE_VERSION,
+      coreVersion: CORE_VERSION,
       sessions: entries,
       active: active && !active.destroyed ? sessionKey(active) : null,
       count,

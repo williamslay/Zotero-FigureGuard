@@ -212,13 +212,18 @@ describe("probeAll: reports every live reader", () => {
 
   it("reports one entry per reader, with the documented keys", async () => {
     closeAll();
-    startup({ id: "probe-all-test" });
+    startup({ id: "probe-all-test", version: "0.1.27-probe" });
     await openReader(481, { currentPageNumber: 3 });
     await openReader(483, { currentPageNumber: 2 });
     await openReader(485, { currentPageNumber: 1 });
 
     const result = probeAll();
     assert.equal(result.count, 3);
+    assert.equal(
+      result.version,
+      "0.1.27-probe",
+      "the report names the installed add-on version the bootstrap supplied, so a machine report proves which build is loaded",
+    );
     assert.equal(result.sessions.length, 3);
     assert.deepEqual(result.sessions.map((entry) => entry.key), ["item:481", "item:483", "item:485"]);
     assert.equal(result.active, "item:481", "active is the session the single-session lookup picks");
@@ -241,7 +246,12 @@ describe("probeAll: reports every live reader", () => {
         "realmSwitches",
         "realmProvenance",
         "realmOwned",
+        "realmUnproven",
         "documentIdAdopted",
+        "lastValidation",
+        "docIdStale",
+        "lastStaleKey",
+        "staleKeyPresent",
         "overlays",
         "enabled",
         "currentPage",
@@ -264,6 +274,14 @@ describe("probeAll: reports every live reader", () => {
     assert.equal(entry.docId, "fcp:seed");
     assert.equal(entry.realmProvenance, "chain", "the realm came from the reader's own documented chain");
     assert.equal(entry.realmOwned, true, "and the reader's chain still lists that realm");
+    assert.equal(entry.realmUnproven, false, "a realm named by the chain is proven, so wakes are free to paint");
+    assert.equal(entry.docIdStale, false, "the session's own drift read finds the document it holds");
+    assert.equal(entry.lastStaleKey, null, "no re-key has released a key yet");
+    assert.equal(entry.staleKeyPresent, false, "with no released key, no stale regions can be held");
+    assert.ok(
+      entry.lastValidation === null || ["ok", "rekeyed", "wait"].includes(entry.lastValidation.decision),
+      "the last wake's decision is reported as one of the three states, or absent before the first wake",
+    );
     assert.equal(entry.overlays, 1);
     assert.equal(entry.enabled, true);
     assert.equal(entry.currentPage, 3, "the page in view comes from the reader realm");
@@ -506,11 +524,30 @@ describe("probeAll: per-reader identity", () => {
     assert.equal(entry.freshDocId, "fcp:own", "the reported pair agrees again");
     assert.equal(entry.documentIdAdopted, false, "a wrong-realm key is a drift, not the provisional adoption");
     assert.ok(entry.realmId, "the session reports the realm identity its canvases are stamped against");
+    assert.deepEqual(
+      { trigger: entry.lastValidation?.trigger, decision: entry.lastValidation?.decision, after: entry.lastValidation?.after },
+      { trigger: "tab-activate", decision: "rekeyed", after: "fcp:own" },
+      "the wake reports what it decided and the identity it left the reader on",
+    );
+    assert.equal(entry.lastStaleKey, "item:920|fcp:other", "and names the cache key it released");
+    assert.equal(entry.docIdStale, false, "the latched key now agrees with the document");
+    assert.equal(entry.staleKeyPresent, false, "the released key holds no regions after the re-key");
+
+    // A live read, not a snapshot taken at the re-key: a region that lands back under
+    // the released key is reported again, so a survivor cannot hide.
+    session.regionCache.set("item:920|fcp:other", 1, [{ rect: [0, 0, 1, 1] }]);
+    assert.equal(
+      probeAll().sessions.find((e) => e.key === "item:920").staleKeyPresent,
+      true,
+      "regions surviving under the released key are reported",
+    );
+    session.regionCache.invalidateDocument("item:920|fcp:other");
 
     // A second activation over the same document is a no-op: no re-key churn.
     session.onTabActivate();
     entry = probeAll().sessions.find((e) => e.key === "item:920");
     assert.equal(entry.docId, "fcp:own", "the correction is stable across wakes");
+    assert.equal(entry.lastValidation?.decision, "ok", "and a wake over its own document decides `ok`");
     session.destroy();
   });
 
@@ -586,6 +623,11 @@ describe("probeAll: per-reader identity", () => {
     assert.equal(wakeStats.count - before.count, 2, "a non-select event is not tallied");
 
     const wake = probeAll().wake;
+    assert.equal(
+      probeAll().version,
+      probeAll().coreVersion,
+      "a startup that supplied no add-on version falls back to the core version",
+    );
     assert.equal(wake.count - before.count, 2, "the probe carries the notifier tally");
     assert.equal(wake.nullTarget - before.nullTarget, 1, "and the fallback count with it");
 

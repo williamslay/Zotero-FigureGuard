@@ -111,6 +111,13 @@ let registeredEventTypes = [];
 /** Handle of the Zotero `tab` notifier, which is not a window observer. */
 let zoteroNotifierId = null;
 let started = false;
+/**
+ * The version the bootstrap reported at startup — the installed add-on version from
+ * `manifest.json`. Empty until a startup supplied one, so `probeAll()` falls back to
+ * the core version in a Run-JavaScript harness that calls `startup()` bare.
+ * @type {string}
+ */
+let addonVersion = "";
 
 /**
  * The `Zotero` global, if this realm has one.
@@ -515,7 +522,9 @@ function collectDiagnostics() {
     }
   }
   return {
-    version: CORE_VERSION,
+    // Same rule as `probeAll()`: the installed add-on version when the bootstrap
+    // supplied one, so no probe reports a build number that contradicts another.
+    version: addonVersion || CORE_VERSION,
     enabled,
     readers: sessions.size,
     documents: documents.size,
@@ -718,6 +727,10 @@ export function startup(data = {}) {
   try {
     if (started) return;
     started = true;
+    // The installed add-on version, from the bootstrap's startup data. Recorded
+    // before anything can bail out: `probeAll().version` is how a report proves which
+    // build is installed, and that matters most on a start that went wrong.
+    addonVersion = String(data?.version ?? "");
     regionCache = new RegionCache({ maxEntries: 256 });
     const zotero = getZotero();
     const readerAPI = zotero?.Reader ?? null;
@@ -788,6 +801,7 @@ export function startup(data = {}) {
 export function shutdown() {
   try {
     started = false;
+    addonVersion = "";
     while (observers.length) removeWindowObserver(observers.pop());
     removeZoteroNotifier();
 
@@ -1029,7 +1043,9 @@ function readRealm(innerWin, tag = "") {
  * `wrappedPva`/`hasCuUnwrap`/`frames`/`href`, plus `realmError` when a cross-realm
  * read threw), `eventBus`, `docId`, `overlays`, `enabled`, `currentPage` (plus
  * `currentPageError`), `cacheKey`, `realmId` (the same stamp the overlay canvases
- * carry in `fcpRealm`), `freshDocId`, `realmSwitches`, `documentIdAdopted`,
+ * carry in `fcpRealm`), `freshDocId`, `realmSwitches`, `realmProvenance`,
+ * `realmOwned` (frame membership), `realmUnproven`, `documentIdAdopted`,
+ * `lastValidation`, `docIdStale`, `lastStaleKey`, `staleKeyPresent`,
  * `scale` (`currentScale`/`currentScaleValue`/`defaultZoomValue`,
  * the zoom the viewer reports now, so a `target.lastPaintGeometry` vs
  * `target.liveViewport` mismatch can be read against the value a fit-width relayout
@@ -1069,10 +1085,12 @@ function describeSession(session) {
     // from `docId` says the correction is not landing on this machine.
     realmSwitches: Number(session.realmSwitches) || 0,
     // Where the latched realm came from (`chain`/`src`/`scan`/`bridge`/
-    // `bridge-guessed`/`none`) and whether it still belongs to this reader's
-    // own chain or iframe set: `bridge` with `realmOwned: false` is the
-    // cross-reader guess, kept visible so the probe proves the adoption gate
-    // is landing on the real machine.
+    // `bridge-guessed`/`none`) and whether the window is still listed by this
+    // reader's own chain or iframe set — frame membership, not document ownership:
+    // it says the realm belongs to this reader's frames, which does not by itself
+    // prove that the document inside it is the one this reader shows. `bridge` with
+    // `realmOwned: false` is the cross-reader guess, kept visible so the probe proves
+    // the adoption gate is landing on the real machine.
     realmProvenance: String(session.realmProvenance ?? "none"),
     realmOwned: (() => {
       try {
@@ -1081,7 +1099,46 @@ function describeSession(session) {
         return false;
       }
     })(),
+    // Whether the realm is still only a guess, so the identity read from it proves
+    // nothing and the wakes hold their paint: `true` with `docId` set is the state
+    // where the plugin deliberately paints nothing rather than the wrong document.
+    realmUnproven: (() => {
+      try {
+        return Boolean(session.realmUnproven?.());
+      } catch {
+        return true;
+      }
+    })(),
     documentIdAdopted: Boolean(session.documentIdAdopted),
+    // What the last wake through `ensureCurrentDocument()` decided — `{trigger,
+    // decision, after, at}` with `decision` in `ok`/`rekeyed`/`wait` and `after` the
+    // identity the wake left behind — plus the scoped cache key the last re-key
+    // released. Together they answer "did the wake see my document, and whose regions
+    // did it drop" without a code change.
+    lastValidation: session.lastValidation ?? null,
+    // True when the session's own drift read reports another document right now, so
+    // the next wake re-keys: a trusted realm, printed against printed. Provisional
+    // re-mints and unproven realms read false, exactly as the gate does.
+    docIdStale: (() => {
+      try {
+        return Boolean(session.docIdentityDrift?.());
+      } catch {
+        return false;
+      }
+    })(),
+    lastStaleKey: session.lastStaleKey ?? null,
+    // True when the key the last re-key released still holds cached regions, which
+    // would mean the previous document's regions are still readable by some session.
+    // `false` is the clean state the re-key is supposed to leave.
+    staleKeyPresent: (() => {
+      try {
+        const stale = session.lastStaleKey ?? null;
+        if (!stale) return false;
+        return Boolean(session.regionCache?.hasDocument?.(stale));
+      } catch {
+        return false;
+      }
+    })(),
     overlays: session.overlays?.size ?? 0,
     enabled: Boolean(session.enabled),
     currentPage: null,
@@ -1182,7 +1239,11 @@ export function probeAll() {
   const active = resolveProbeTarget().session;
   const result = {
     at: new Date().toISOString(),
-    version: CORE_VERSION,
+    // The installed add-on version the bootstrap reported, so a machine report proves
+    // which build is loaded; the core build stays visible in `coreVersion` for the
+    // harness cases that call `startup()` without version data.
+    version: addonVersion || CORE_VERSION,
+    coreVersion: CORE_VERSION,
     sessions: entries,
     active: active && !active.destroyed ? sessionKey(active) : null,
     count,
