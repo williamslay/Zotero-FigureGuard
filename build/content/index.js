@@ -3301,6 +3301,7 @@ var FigureColorPlugin = (() => {
       this.noBusWarned = false;
       this.lastValidation = null;
       this.lastStaleKey = null;
+      this.paintOnSelectPending = false;
       this.onDocumentEvent = () => this.queueDocumentCheck();
       this.onPageRenderedEvent = (event) => {
         try {
@@ -3456,10 +3457,27 @@ var FigureColorPlugin = (() => {
      * stays behind it: the sweep picks up a document that finishes loading while the
      * tab is in the background, which the validation above cannot see because the
      * document was not there yet.
+     *
+     * The startup storm makes wakes cheap: a coalesced notification wakes every tab
+     * the user switched through, but only the one on screen needs to paint, so a
+     * background wake passes `paint: false`. It keeps the identity validation — the
+     * re-key it can trigger is rare and has to run wherever it lands — and leaves the
+     * sweep out: the detection and canvas work of a hidden page would stall the app
+     * for a document nobody is looking at. The session marks itself with
+     * `paintOnSelectPending` so its own future select wake (or a toolbar render)
+     * repaints it.
+     *
+     * @param {{paint?: boolean}} [options] `paint: false` verifies the identity only,
+     * for a tab that is not the one on screen. Default true: the wake paints.
      */
-    onTabActivate() {
+    onTabActivate({ paint = true } = {}) {
       if (this.destroyed) return;
       this.ensureCurrentDocument("tab-activate");
+      if (!paint) {
+        this.paintOnSelectPending = true;
+        return;
+      }
+      this.paintOnSelectPending = false;
       this.queueDocumentCheck();
     }
     /**
@@ -4622,12 +4640,21 @@ var FigureColorPlugin = (() => {
     }
     wakeStats.count += 1;
     if (!targets.size) wakeStats.nullTarget += 1;
+    let activeReader = null;
+    try {
+      activeReader = zotero?.Reader?.getActive?.() ?? null;
+    } catch (ignored) {
+    }
     for (const [, record] of sessions) {
       const session = record.session;
       if (!session || session.destroyed) continue;
       if (targets.size && !targets.has(record.reader) && !targets.has(session.reader)) continue;
       try {
-        session.onTabActivate?.();
+        if (activeReader && record.reader !== activeReader && session.reader !== activeReader) {
+          session.onTabActivate?.({ paint: false });
+        } else {
+          session.onTabActivate?.();
+        }
       } catch (err) {
         warnOnce("tab-activate", err);
       }

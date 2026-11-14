@@ -656,6 +656,16 @@ function installViewerBridge(win) {
  * tab whose content finished loading during that storm, and a wake is an
  * idempotent re-validation and repaint, so reacting to it costs nothing.
  *
+ * The coalesced startup batch wakes all named tabs, but only the one on screen
+ * repaints. The on-screen reader is resolved once per notification through
+ * `Zotero.Reader.getActive()` (Zotero 7+); every other named session wakes with
+ * `paint: false`, which re-validates its document identity cheaply and defers
+ * painting — a hidden tab's detection and canvas work during the boot storm was
+ * measurably stalling Zotero. The deferred session relies on its own future
+ * select wake, or a toolbar render, to paint. When `getActive()` resolves to
+ * nothing (absent, or it throws), every named session gets the full paint wake,
+ * exactly the behavior before the gate.
+ *
  * @param {string} event Notifier event, e.g. "select" or "load".
  * @param {Array<*>|undefined|null} [ids] Tab ids the event carries.
  * @param {object} [extra] Notifier's extra data, may carry `id`.
@@ -691,6 +701,15 @@ export function wakeTabSessions(event, ids, extra) {
   }
   wakeStats.count += 1;
   if (!targets.size) wakeStats.nullTarget += 1;
+  // The one reader on screen, resolved once per notification: it is the only tab
+  // whose paint work is worth doing now. An unreadable answer is null, which leaves
+  // every named session on the full paint wake.
+  let activeReader = null;
+  try {
+    activeReader = zotero?.Reader?.getActive?.() ?? null;
+  } catch (ignored) {
+    // A Reader that cannot answer the Zotero 7+ getActive read is the null case.
+  }
   for (const [, record] of sessions) {
     const session = record.session;
     if (!session || session.destroyed) continue;
@@ -699,7 +718,13 @@ export function wakeTabSessions(event, ids, extra) {
     // the document it paints stopped being provably its own.
     if (targets.size && !targets.has(record.reader) && !targets.has(session.reader)) continue;
     try {
-      session.onTabActivate?.();
+      // A named tab that is not the one on screen: re-validate its identity only,
+      // the on-screen session's check paints the visible document.
+      if (activeReader && record.reader !== activeReader && session.reader !== activeReader) {
+        session.onTabActivate?.({ paint: false });
+      } else {
+        session.onTabActivate?.();
+      }
     } catch (err) {
       warnOnce("tab-activate", err);
     }

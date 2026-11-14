@@ -42,6 +42,11 @@ function installFakeZotero() {
       getByTabID() {
         return null;
       },
+      // Zotero 7+ answers this; the null default keeps every woken tab on the full
+      // paint wake, so a test only sets it when it pins the lazy-wake gate.
+      getActive() {
+        return null;
+      },
     },
   };
 }
@@ -721,6 +726,95 @@ describe("probeAll: per-reader identity", () => {
 
     delete zotero.Notifier;
     session.destroy();
+  });
+
+  it("wakes the startup batch but paints only the on-screen tab", async () => {
+    closeAll();
+    startup({ id: "probe-lazy-wake" });
+    const first = await openReader(970, { currentPageNumber: 1 });
+    const second = await openReader(971, { currentPageNumber: 1 });
+    const zotero = globalThis.Zotero;
+    const notifier = fakeNotifier();
+    zotero.Notifier = notifier.api;
+    zotero.Reader.getByTabID = (tabId) =>
+      tabId === 3001 ? first.reader : tabId === 3002 ? second.reader : null;
+    zotero.Reader.getActive = () => first.reader;
+    addZoteroNotifier(zotero);
+    assert.equal(first.paintOnSelectPending, false, "a fresh session starts with no pending repaint");
+
+    // Counting stands in for the sweep: replacing the method keeps the test from
+    // arming a real debounce timer, so "no sweep" is an empty list, not a missed fire.
+    const sweeps = [];
+    first.queueDocumentCheck = () => {
+      sweeps.push("first");
+    };
+    second.queueDocumentCheck = () => {
+      sweeps.push("second");
+    };
+
+    // The merged startup batch, with the first tab on screen: both identities are
+    // re-validated, only the visible one queues the detection and canvas work.
+    notifier.trigger("select", "tab", [3001, 3002]);
+    assert.deepEqual(sweeps, ["first"], "only the on-screen reader queues the paint sweep");
+    assert.equal(second.paintOnSelectPending, true, "the hidden tab flags the repaint for its own select wake");
+    assert.equal(
+      second.lastValidation?.trigger,
+      "tab-activate",
+      "the hidden tab still re-validated its document identity",
+    );
+
+    // A `load` for the hidden tab is verify-only as well.
+    sweeps.length = 0;
+    second.paintOnSelectPending = false;
+    notifier.trigger("load", "tab", [3002]);
+    assert.deepEqual(sweeps, [], "a load wake for the hidden tab queues no sweep");
+    assert.equal(second.paintOnSelectPending, true, "and it leaves the repaint pending, not painted");
+
+    // The steady-state per-switch select, now naming the visible reader: full wake.
+    zotero.Reader.getActive = () => second.reader;
+    notifier.trigger("select", "tab", [3002]);
+    assert.deepEqual(sweeps, ["second"], "the select for the now-visible tab paints");
+    assert.equal(second.paintOnSelectPending, false, "and clears the pending flag");
+
+    delete zotero.Notifier;
+    zotero.Reader.getActive = () => null;
+    first.destroy();
+    second.destroy();
+  });
+
+  it("paints every woken tab when the active reader cannot be resolved", async () => {
+    closeAll();
+    startup({ id: "probe-lazy-wake-null" });
+    const first = await openReader(972, { currentPageNumber: 1 });
+    const second = await openReader(973, { currentPageNumber: 1 });
+    const zotero = globalThis.Zotero;
+    const notifier = fakeNotifier();
+    zotero.Notifier = notifier.api;
+    zotero.Reader.getByTabID = (tabId) =>
+      tabId === 3003 ? first.reader : tabId === 3004 ? second.reader : null;
+    addZoteroNotifier(zotero);
+
+    const sweeps = [];
+    first.queueDocumentCheck = () => {
+      sweeps.push("first");
+    };
+    second.queueDocumentCheck = () => {
+      sweeps.push("second");
+    };
+
+    // The stub's default: `getActive` answers null — the gate stays open.
+    notifier.trigger("select", "tab", [3003, 3004]);
+    assert.deepEqual(sweeps, ["first", "second"], "a null active reader paints every named tab, as before the gate");
+
+    // A Reader without the getActive read at all: same backward-compatible wake.
+    sweeps.length = 0;
+    delete zotero.Reader.getActive;
+    notifier.trigger("select", "tab", [3003, 3004]);
+    assert.deepEqual(sweeps, ["first", "second"], "a Reader without getActive also wakes every tab to paint");
+
+    delete zotero.Notifier;
+    first.destroy();
+    second.destroy();
   });
 
   it("unregisters the observer with the exact id Zotero returned", () => {

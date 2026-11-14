@@ -729,6 +729,14 @@ export class ReaderSession {
      * @type {string|null}
      */
     this.lastStaleKey = null;
+    /**
+     * A background wake asked this session to re-validate; the next paint-driving
+     * wake must repaint. Set by `onTabActivate({ paint: false })` — the startup
+     * batch path for a tab that is not on screen — and cleared by the next wake
+     * that paints. Plain flag, read back by the probe tests.
+     * @type {boolean}
+     */
+    this.paintOnSelectPending = false;
 
     // Arrow handlers so the event bus can keep its own references.
     this.onDocumentEvent = () => this.queueDocumentCheck();
@@ -949,10 +957,27 @@ export class ReaderSession {
    * stays behind it: the sweep picks up a document that finishes loading while the
    * tab is in the background, which the validation above cannot see because the
    * document was not there yet.
+   *
+   * The startup storm makes wakes cheap: a coalesced notification wakes every tab
+   * the user switched through, but only the one on screen needs to paint, so a
+   * background wake passes `paint: false`. It keeps the identity validation — the
+   * re-key it can trigger is rare and has to run wherever it lands — and leaves the
+   * sweep out: the detection and canvas work of a hidden page would stall the app
+   * for a document nobody is looking at. The session marks itself with
+   * `paintOnSelectPending` so its own future select wake (or a toolbar render)
+   * repaints it.
+   *
+   * @param {{paint?: boolean}} [options] `paint: false` verifies the identity only,
+   * for a tab that is not the one on screen. Default true: the wake paints.
    */
-  onTabActivate() {
+  onTabActivate({ paint = true } = {}) {
     if (this.destroyed) return;
     this.ensureCurrentDocument("tab-activate");
+    if (!paint) {
+      this.paintOnSelectPending = true;
+      return;
+    }
+    this.paintOnSelectPending = false;
     this.queueDocumentCheck();
   }
 

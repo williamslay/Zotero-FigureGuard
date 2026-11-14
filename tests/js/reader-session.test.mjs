@@ -924,6 +924,38 @@ describe("reader session: fresh-open paint gaps", () => {
     }
   });
 
+  it("keeps a background wake from queueing the paint sweep", () => {
+    const timers = fakeTimers();
+    try {
+      resetWarnOnce();
+      const session = newSession(fakeReader(536));
+      const checks = spy(session, "queueDocumentCheck");
+      const realms = spy(session, "reevaluateRealm");
+
+      session.onTabActivate({ paint: false });
+
+      assert.equal(realms.n, 1, "a background wake still re-validates the realm and document identity");
+      assert.equal(checks.n, 0, "a background wake queues no document check");
+      assert.equal(
+        timers.delays().filter((ms) => ms === DOCUMENT_CHECK_MS).length,
+        0,
+        "no debounced sweep is armed for the hidden page",
+      );
+      assert.equal(session.lastValidation?.trigger, "tab-activate", "the verify wake is recorded like any other");
+      assert.equal(session.paintOnSelectPending, true, "the next paint-driving wake is flagged to repaint");
+
+      session.onTabActivate();
+
+      assert.equal(checks.n, 1, "the selected wake queues the sweep again");
+      assert.equal(session.paintOnSelectPending, false, "and the pending flag goes with it");
+
+      session.destroy();
+      assert.equal(timers.pending(), 0, "the pending wake went with the session");
+    } finally {
+      timers.restore();
+    }
+  });
+
   it("keeps a connected overlay across an activation over the same realm", () => {
     resetWarnOnce();
     const reader = fakeReader(537);

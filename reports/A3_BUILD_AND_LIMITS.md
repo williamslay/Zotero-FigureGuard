@@ -1437,3 +1437,31 @@ Image 一并裁剪并计入 `clippedCount`）；`flash-detect.test.mjs` +1（第
 ### 构建产物
 
 - `package.json`、`manifest.json`、`build/manifest.json` 同为 0.1.29；`npm run build` → `dist/figure-color-preservation-0.1.29.xpi`（49,794 字节）；`build/` 与 `dist/` 重新生成，未手改。
+
+## 第 30 轮：懒唤醒——非活动 tab 只验证不重画 — v0.1.30
+
+### 动因（真机反馈，0.1.29）
+
+启动期快速切换时，合并批次唤醒会让每个被点名的会话都重画一遍（隐藏页的检测+画布工作），用户实测「偶尔卡住」，确认存在性能压力。诉求：只有当前显示的 tab 才做识别反色，其余懒处理。
+
+### 改动（唤醒路径拆分，检测层零改动）
+
+1. **`onTabActivate({ paint })`**（`reader-session.js`）：身份验证（`ensureCurrentDocument("tab-activate")`，纯读，罕见时内部 `commitRekey` 会重画——保留）始终执行；`paint:false` 时跳过 `queueDocumentCheck()`（去抖扫描，隐藏页检测/重画的来源），置 `paintOnSelectPending=true`；`paint:true`（默认，被选中的 tab）清标志并照常扫描。
+2. **`wakeTabSessions` 门控**（`main.js`）：每条通知解析一次 `Zotero.Reader.getActive()`（Zotero 7+ 起有，可选链+try/catch 防御）；点名但非活动的会话收 `onTabActivate({paint:false})`，活动会话（或 `getActive` 不可用时全部）收完整唤醒。隐藏会话的重画留给它自己被选中时的 select 唤醒（稳态逐条送达已真机证实）或工具条渲染。
+3. `wakeStats`、targets 集合、无 ids 兜底全唤醒、逐会话 try/catch 均不变。
+
+### 测试
+
+- `probe-all.test.mjs`：新增「批次只重画屏上 tab」（A 全唤醒、B 仅验证：无扫描+`paintOnSelectPending`+`tab-activate` 记录；hidden 的 load 同样仅验证；B 之后被选中时补画并清标志）、「`getActive` 不可用回退全画」（null 与缺失两分支）；stub 补 `Reader.getActive`（返回 null，0.1.29 用例走旧行为零改动）。
+- `reader-session.test.mjs`：新增「后台唤醒不排扫描」（假定时器：`{paint:false}` 验证但不起 DOCUMENT_CHECK_MS 定时器；普通唤醒起表并清标志）。
+- 全量 `npm test`：422 tests / **0 fail**（419 → 422）。
+
+### 真机验收要点
+
+- 复现路径重测：重启 Zotero（多 tab）→ 立刻快速切换：屏上 tab 反色即时出现；启动期卡顿应明显减轻或消失。
+- 每个 tab 被选中的那一刻补画（可能比屏上 tab 晚零点几秒，属预期懒行为）。
+- 若某隐藏 tab 被选中后迟迟不画，立刻采 `probeAll()` 看该会话 `paintOnSelectPending` 与 `lastValidation`。
+
+### 构建产物
+
+- `package.json`、`manifest.json`、`build/manifest.json` 同为 0.1.30；`npm run build` → `dist/figure-color-preservation-0.1.30.xpi`（50,163 字节）；`build/` 与 `dist/` 重新生成，未手改。
