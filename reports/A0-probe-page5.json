@@ -1,0 +1,672 @@
+{
+  "file": "PipeBWrite.pdf",
+  "pdfjsDistVersion": "6.5.438",
+  "pageIndex": 4,
+  "viewportSize": [
+    612,
+    792
+  ],
+  "pageRotate": 0,
+  "userUnit": 1,
+  "opCount": 1664,
+  "leadingOps": [
+    {
+      "i": 0,
+      "op": "setFillRGBColor",
+      "args": [
+        "#000000"
+      ]
+    },
+    {
+      "i": 1,
+      "op": "setStrokeRGBColor",
+      "args": [
+        "#000000"
+      ]
+    },
+    {
+      "i": 2,
+      "op": "setFillRGBColor",
+      "args": [
+        "#000000"
+      ]
+    },
+    {
+      "i": 3,
+      "op": "setStrokeRGBColor",
+      "args": [
+        "#000000"
+      ]
+    },
+    {
+      "i": 4,
+      "op": "setFillRGBColor",
+      "args": [
+        "#000000"
+      ]
+    },
+    {
+      "i": 5,
+      "op": "setStrokeRGBColor",
+      "args": [
+        "#000000"
+      ]
+    },
+    {
+      "i": 6,
+      "op": "transform",
+      "args": [
+        1,
+        0,
+        0,
+        1,
+        54,
+        617.946
+      ]
+    },
+    {
+      "i": 7,
+      "op": "save",
+      "args": null
+    },
+    {
+      "i": 8,
+      "op": "transform",
+      "args": [
+        1.00053,
+        0,
+        0,
+        1.00053,
+        0,
+        0
+      ]
+    },
+    {
+      "i": 9,
+      "op": "save",
+      "args": null
+    },
+    {
+      "i": 10,
+      "op": "transform",
+      "args": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "i": 11,
+      "op": "paintFormXObjectBegin",
+      "args": [
+        null,
+        {
+          "0": 0,
+          "1": 0,
+          "2": 240,
+          "3": 102
+        }
+      ]
+    },
+    {
+      "i": 12,
+      "op": "save",
+      "args": null
+    },
+    {
+      "i": 13,
+      "op": "transform",
+      "args": [
+        0.1,
+        0,
+        0,
+        0.1,
+        0,
+        0
+      ]
+    },
+    {
+      "i": 14,
+      "op": "save",
+      "args": null
+    },
+    {
+      "i": 15,
+      "op": "eoClip",
+      "args": null
+    },
+    {
+      "i": 16,
+      "op": "constructPath",
+      "args": [
+        28,
+        [
+          {
+            "0": 0,
+            "1": 0,
+            "2": 4,
+            "3": 1,
+            "4": 0,
+            "5": 1020,
+            "6": 1,
+            "7": 2398,
+            "8": 1020,
+            "9": 1,
+            "10": 2398,
+            "11": 4,
+            "12": 4
+          }
+        ],
+        {
+          "0": 0,
+          "1": 4,
+          "2": 2398,
+          "3": 1020
+        }
+      ]
+    },
+    {
+      "i": 17,
+      "op": "setFillRGBColor",
+      "args": [
+        "#f1e4d8"
+      ]
+    },
+    {
+      "i": 18,
+      "op": "constructPath",
+      "args": [
+        22,
+        [
+          {
+            "0": 0,
+            "1": 1085.5400390625,
+            "2": 27.9335994720459,
+            "3": 1,
+            "4": 2379.5400390625,
+            "5": 27.9335994720459,
+            "6": 1,
+            "7": 2379.5400390625,
+            "8": 351.43359375,
+            "9": 1,
+            "10": 1085.5400390625,
+            "11": 351.43359375,
+            "12": 4
+          }
+        ],
+        {
+          "0": 1085.5400390625,
+          "1": 27.9335994720459,
+          "2": 2379.5400390625,
+          "3": 351.43359375
+        }
+      ]
+    },
+    {
+      "i": 19,
+      "op": "setFillRGBColor",
+      "args": [
+        "#e6e6e6"
+      ]
+    },
+    {
+      "i": 20,
+      "op": "constructPath",
+      "args": [
+        22,
+        [
+          {
+            "0": 0,
+            "1": 7.210939884185791,
+            "2": 27.9335994720459,
+            "3": 1,
+            "4": 1085.5408935546875,
+            "5": 27.9335994720459,
+            "6": 1,
+            "7": 1085.5408935546875,
+            "8": 387.37860107421875,
+            "9": 1,
+            "10": 7.210939884185791,
+            "11": 387.37860107421875,
+            "12": 4
+          }
+        ],
+        {
+          "0": 7.210939884185791,
+          "1": 27.9335994720459,
+          "2": 1085.5408935546875,
+          "3": 387.37860107421875
+        }
+      ]
+    },
+    {
+      "i": 21,
+      "op": "constructPath",
+      "args": [
+        22,
+        [
+          {
+            "0": 0,
+            "1": 7.210939884185791,
+            "2": 351.4339904785156,
+            "3": 1,
+            "4": 1516.8809814453125,
+            "5": 351.4339904785156,
+            "6": 1,
+            "7": 1516.8809814453125,
+            "8": 1012.81298828125,
+            "9": 1,
+            "10": 7.210939884185791,
+            "11": 1012.81298828125,
+            "12": 4
+          }
+        ],
+        {
+          "0": 7.210939884185791,
+          "1": 351.4339904785156,
+          "2": 1516.8809814453125,
+          "3": 1012.81298828125
+        }
+      ]
+    },
+    {
+      "i": 22,
+      "op": "setFillRGBColor",
+      "args": [
+        "#f1e4d8"
+      ]
+    },
+    {
+      "i": 23,
+      "op": "constructPath",
+      "args": [
+        22,
+        [
+          {
+            "0": 0,
+            "1": 1516.8800048828125,
+            "2": 315.4880065917969,
+            "3": 1,
+            "4": 2379.5439453125,
+            "5": 315.4880065917969,
+            "6": 1,
+            "7": 2379.5439453125,
+            "8": 1012.81201171875,
+            "9": 1,
+            "10": 1516.8800048828125,
+            "11": 1012.81201171875,
+            "12": 4
+          }
+        ],
+        {
+          "0": 1516.8800048828125,
+          "1": 315.4880065917969,
+          "2": 2379.5439453125,
+          "3": 1012.81201171875
+        }
+      ]
+    }
+  ],
+  "formAndImageEvents": [
+    {
+      "kind": "formBegin",
+      "opIndex": 11,
+      "ctmBefore": [
+        1.00053,
+        0,
+        0,
+        1.00053,
+        54,
+        617.946
+      ],
+      "formMatrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "formBBox": {
+        "0": 0,
+        "1": 0,
+        "2": 240,
+        "3": 102
+      },
+      "rectUserSpace": null,
+      "formDepth": 0
+    },
+    {
+      "kind": "formEnd",
+      "opIndex": 513,
+      "formDepth": 0
+    },
+    {
+      "kind": "formBegin",
+      "opIndex": 952,
+      "ctmBefore": [
+        0.43729,
+        0,
+        0,
+        0.43729,
+        317.88,
+        577.48
+      ],
+      "formMatrix": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "formBBox": {
+        "0": 0,
+        "1": 0,
+        "2": 549.1199951171875,
+        "3": 325.9200134277344
+      },
+      "rectUserSpace": null,
+      "formDepth": 0
+    },
+    {
+      "kind": "formEnd",
+      "opIndex": 1510,
+      "formDepth": 0
+    }
+  ],
+  "opCounts": {
+    "setFillRGBColor": 178,
+    "setStrokeRGBColor": 86,
+    "transform": 66,
+    "save": 122,
+    "paintFormXObjectBegin": 2,
+    "eoClip": 76,
+    "constructPath": 620,
+    "setFlatness": 40,
+    "setLineWidth": 34,
+    "setMiterLimit": 20,
+    "restore": 122,
+    "beginMarkedContentProps": 1,
+    "endMarkedContent": 1,
+    "paintFormXObjectEnd": 2,
+    "beginText": 18,
+    "dependency": 6,
+    "setFont": 28,
+    "setTextMatrix": 91,
+    "showText": 122,
+    "moveText": 11,
+    "endText": 18
+  },
+  "unclosed": {
+    "stackLeft": 0,
+    "formDepthLeft": 0
+  },
+  "captionItems": [
+    {
+      "str": "Figure 2: Data dependency graph of buffered write internal",
+      "transform": [
+        10.162,
+        0,
+        0,
+        9.963,
+        54,
+        599.615
+      ],
+      "height": 9.963,
+      "width": 240.125,
+      "hasEOL": true
+    },
+    {
+      "str": "steps defined in Figure 1. For correctness, operations in th",
+      "transform": [
+        10.162,
+        0,
+        0,
+        9.963,
+        54,
+        587.659
+      ],
+      "height": 9.963,
+      "width": 240.114,
+      "hasEOL": true
+    },
+    {
+      "str": "As shown in Figure 2, Step 5 requires a prepared destination",
+      "transform": [
+        9.763,
+        0,
+        0,
+        9.963,
+        53.641,
+        459.001
+      ],
+      "height": 9.963,
+      "width": 240.381,
+      "hasEOL": true
+    },
+    {
+      "str": "Figure 3: Architecture of PipeBWrite. Original buffered-writ",
+      "transform": [
+        9.763,
+        0,
+        0,
+        9.963,
+        317.88,
+        559.149
+      ],
+      "height": 9.963,
+      "width": 240.12,
+      "hasEOL": true
+    },
+    {
+      "str": "also shown in green. To avoid confusion with Figure 1, this",
+      "transform": [
+        10.162,
+        0,
+        0,
+        9.963,
+        317.88,
+        511.328
+      ],
+      "height": 9.963,
+      "width": 240.125,
+      "hasEOL": true
+    },
+    {
+      "str": "architecture of PipeBWrite in Figure 3. PipeBWrite resides",
+      "transform": [
+        10.162,
+        0,
+        0,
+        9.963,
+        317.88,
+        300.3
+      ],
+      "height": 9.963,
+      "width": 240.125,
+      "hasEOL": true
+    }
+  ],
+  "pageSurvey": [
+    {
+      "page": 1,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 844,
+      "formBegins": 3,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 2,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 585,
+      "formBegins": 0,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 3,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 1727,
+      "formBegins": 1,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 4,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 599,
+      "formBegins": 0,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 5,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 1664,
+      "formBegins": 2,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 6,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 1395,
+      "formBegins": 1,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 7,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 1259,
+      "formBegins": 5,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 8,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 450,
+      "formBegins": 0,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 9,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 1764,
+      "formBegins": 4,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 10,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 680,
+      "formBegins": 1,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 11,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 2595,
+      "formBegins": 10,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 12,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 1063,
+      "formBegins": 1,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 13,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 959,
+      "formBegins": 3,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 14,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 584,
+      "formBegins": 0,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 15,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 399,
+      "formBegins": 0,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    },
+    {
+      "page": 16,
+      "width": 612,
+      "height": 792,
+      "rotation": 0,
+      "opCount": 414,
+      "formBegins": 0,
+      "imagePaints": 0,
+      "maxFormDepth": 0,
+      "stackLeft": 0
+    }
+  ]
+}

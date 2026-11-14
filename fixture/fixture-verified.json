@@ -1,0 +1,96 @@
+{
+  "pdf_filename": "PipeBWrite.pdf",
+  "sha256": "50f36067631ea6b491982324e283588c5d72240160833ff631a25314c77f0b26",
+  "page_index": 4,
+  "page_number": 5,
+  "page_size": [
+    612.0,
+    792.0
+  ],
+  "page_rotation": 0,
+  "has_struct_tree": false,
+  "image_xobjects_count": 0,
+  "xobjects": [
+    {
+      "name": "/Im5",
+      "subtype": "/Form",
+      "xref": 15,
+      "bbox_local": [
+        0.0,
+        0.0,
+        240.0,
+        102.0
+      ],
+      "ctm": [
+        1.00053,
+        0.0,
+        0.0,
+        1.00053,
+        54.0,
+        617.946
+      ],
+      "bbox_pdf_user": [
+        54.0,
+        617.946,
+        294.1272,
+        720.0001
+      ],
+      "bbox_page_top_left": [
+        54.0,
+        71.9999,
+        294.1272,
+        174.054
+      ]
+    },
+    {
+      "name": "/Im6",
+      "subtype": "/Form",
+      "xref": 16,
+      "bbox_local": [
+        0.0,
+        0.0,
+        549.12,
+        325.92
+      ],
+      "ctm": [
+        0.43729,
+        0.0,
+        0.0,
+        0.43729,
+        317.88,
+        577.48
+      ],
+      "bbox_pdf_user": [
+        317.88,
+        577.48,
+        558.0047,
+        720.0016
+      ],
+      "bbox_page_top_left": [
+        317.88,
+        71.9984,
+        558.0047,
+        214.52
+      ]
+    }
+  ],
+  "captions_top_left": {
+    "Figure 2:": [
+      [
+        54.0,
+        184.754,
+        91.02,
+        194.816
+      ]
+    ],
+    "Figure 3:": [
+      [
+        317.88,
+        225.371,
+        353.145,
+        235.234
+      ]
+    ]
+  },
+  "note": "Top-left conversion is fixture-specific; plug-in must use actual PDF.js viewport for CropBox/rotation/UserUnit."
+}

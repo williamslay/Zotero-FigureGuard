@@ -1,0 +1,13 @@
+# Keep the copyrighted test paper and generated screenshots out of public repos
+fixture/*.pdf
+fixture/*.png
+node_modules/
+dist/
+reports/*.png
+reports/*.log
+__pycache__/
+.pytest_cache/
+
+# Keep copyrighted papers and one-off archives out of the public repo
+/*.pdf
+/*.zip

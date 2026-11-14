@@ -1,0 +1,440 @@
+[
+  {
+    "page": 1,
+    "placements": 4,
+    "xobjects": 3,
+    "pathBoxes": 10,
+    "pathClusters": 1,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [
+      "below-min-area",
+      "image-below-area-threshold",
+      "image-below-area-threshold",
+      "image-below-area-threshold"
+    ],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 2,
+    "placements": 2,
+    "xobjects": 0,
+    "pathBoxes": 67,
+    "pathClusters": 2,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [
+      "1"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          379.68,
+          90.24,
+          535.72,
+          183.91
+        ],
+        "caption": "1",
+        "kind": "path",
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0302
+      }
+    ],
+    "rejectedReasons": [
+      "below-min-area"
+    ],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 3,
+    "placements": 1,
+    "xobjects": 0,
+    "pathBoxes": 18,
+    "pathClusters": 1,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [
+      "2"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          335.93,
+          72,
+          537.53,
+          169.56
+        ],
+        "caption": "2",
+        "kind": "path",
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0406
+      }
+    ],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 4,
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 5,
+    "placements": 1,
+    "xobjects": 0,
+    "pathBoxes": 93,
+    "pathClusters": 1,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [
+      "3"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          318.81,
+          72.67,
+          477.25,
+          210.32
+        ],
+        "caption": "3",
+        "kind": "path",
+        "confidence": 0.9,
+        "pageAreaRatio": 0.045
+      }
+    ],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 6,
+    "placements": 1,
+    "xobjects": 0,
+    "pathBoxes": 248,
+    "pathClusters": 1,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [
+      "4"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          57.8,
+          72,
+          551.65,
+          275.8
+        ],
+        "caption": "4",
+        "kind": "path",
+        "confidence": 0.9,
+        "pageAreaRatio": 0.2077
+      }
+    ],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 7,
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 8,
+    "placements": 1,
+    "xobjects": 0,
+    "pathBoxes": 49,
+    "pathClusters": 1,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [
+      "5"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          67.44,
+          79.37,
+          275.12,
+          163.92
+        ],
+        "caption": "5",
+        "kind": "path",
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0362
+      }
+    ],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 9,
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 10,
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 11,
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 12,
+    "placements": 18,
+    "xobjects": 16,
+    "pathBoxes": 72,
+    "pathClusters": 2,
+    "pathBoxesOffPage": 15,
+    "pathClusterSplits": 1,
+    "captions": [
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          54,
+          72,
+          557.99,
+          147.37
+        ],
+        "caption": "6",
+        "kind": "path",
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0784
+      },
+      {
+        "rect": [
+          54,
+          160.92,
+          558,
+          237.58
+        ],
+        "caption": "10",
+        "kind": "path",
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0797
+      }
+    ],
+    "rejectedReasons": [
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area"
+    ],
+    "uncoveredCaptions": [
+      "7",
+      "8",
+      "9",
+      "11",
+      "12"
+    ]
+  },
+  {
+    "page": 13,
+    "placements": 39,
+    "xobjects": 37,
+    "pathBoxes": 51,
+    "pathClusters": 2,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [
+      "13",
+      "14"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          54,
+          72,
+          294.05,
+          127.62
+        ],
+        "caption": "13",
+        "kind": "path",
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0275
+      },
+      {
+        "rect": [
+          317.96,
+          72,
+          558,
+          166.15
+        ],
+        "caption": "14",
+        "kind": "path",
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0466
+      }
+    ],
+    "rejectedReasons": [
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area",
+      "below-min-area"
+    ],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 14,
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 15,
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 16,
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 17,
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 18,
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "pathBoxesOffPage": 0,
+    "pathClusterSplits": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  }
+]

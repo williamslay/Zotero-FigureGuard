@@ -1,0 +1,464 @@
+[
+  {
+    "page": 1,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 1,
+    "xobjects": 1,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [
+      "image-below-area-threshold"
+    ],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 2,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 2,
+    "xobjects": 0,
+    "pathBoxes": 41,
+    "pathClusters": 2,
+    "captions": [
+      "1"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          346.83,
+          85,
+          548.97,
+          123.18
+        ],
+        "caption": "1",
+        "kind": "path",
+        "placements": 1,
+        "confidence": 0.75,
+        "pageAreaRatio": 0.0159
+      }
+    ],
+    "rejectedReasons": [
+      "below-confidence-threshold"
+    ],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 3,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 8,
+    "xobjects": 5,
+    "pathBoxes": 104,
+    "pathClusters": 3,
+    "captions": [
+      "4",
+      "2",
+      "3"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          60.71,
+          83.69,
+          287.13,
+          142.75
+        ],
+        "caption": "2",
+        "kind": "form+path",
+        "placements": 3,
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0276
+      },
+      {
+        "rect": [
+          324.87,
+          83.69,
+          551.29,
+          142.76
+        ],
+        "caption": "4",
+        "kind": "form+path",
+        "placements": 3,
+        "confidence": 0.95,
+        "pageAreaRatio": 0.0276
+      },
+      {
+        "rect": [
+          73.04,
+          194.45,
+          274.8,
+          273.32
+        ],
+        "caption": "3",
+        "kind": "form+path",
+        "placements": 2,
+        "confidence": 0.95,
+        "pageAreaRatio": 0.0328
+      }
+    ],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 4,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 4,
+    "xobjects": 2,
+    "pathBoxes": 73,
+    "pathClusters": 2,
+    "captions": [
+      "5",
+      "6"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          330.44,
+          79.56,
+          537.16,
+          182.92
+        ],
+        "caption": "6",
+        "kind": "path",
+        "placements": 1,
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0441
+      },
+      {
+        "rect": [
+          56.04,
+          83.69,
+          292.54,
+          137.12
+        ],
+        "caption": "5",
+        "kind": "form+path",
+        "placements": 3,
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0261
+      }
+    ],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 5,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 3,
+    "xobjects": 0,
+    "pathBoxes": 325,
+    "pathClusters": 3,
+    "captions": [
+      "7",
+      "8",
+      "9"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          340.76,
+          250.6,
+          547.53,
+          324.48
+        ],
+        "caption": "9",
+        "kind": "path",
+        "placements": 1,
+        "confidence": 0.85,
+        "pageAreaRatio": 0.0315
+      }
+    ],
+    "rejectedReasons": [
+      "below-confidence-threshold",
+      "below-confidence-threshold"
+    ],
+    "uncoveredCaptions": [
+      "7",
+      "8"
+    ]
+  },
+  {
+    "page": 6,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 1,
+    "xobjects": 0,
+    "pathBoxes": 52,
+    "pathClusters": 1,
+    "captions": [
+      "10"
+    ],
+    "accepted": [],
+    "rejectedReasons": [
+      "below-confidence-threshold"
+    ],
+    "uncoveredCaptions": [
+      "10"
+    ]
+  },
+  {
+    "page": 7,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 2,
+    "xobjects": 0,
+    "pathBoxes": 11,
+    "pathClusters": 2,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [
+      "path-below-area-threshold",
+      "path-below-area-threshold"
+    ],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 8,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 1,
+    "xobjects": 0,
+    "pathBoxes": 8,
+    "pathClusters": 1,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [
+      "extreme-aspect"
+    ],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 9,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 8,
+    "xobjects": 6,
+    "pathBoxes": 404,
+    "pathClusters": 2,
+    "captions": [
+      "12",
+      "11"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          56.04,
+          83.68,
+          556.7,
+          173.84
+        ],
+        "caption": "12",
+        "kind": "path+form",
+        "placements": 3,
+        "confidence": 0.95,
+        "pageAreaRatio": 0.0931
+      },
+      {
+        "rect": [
+          56.04,
+          168.86,
+          302.64,
+          234.84
+        ],
+        "caption": "11",
+        "kind": "form+path",
+        "placements": 3,
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0336
+      }
+    ],
+    "rejectedReasons": [
+      "no-figure-evidence",
+      "no-figure-evidence"
+    ],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 10,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 12,
+    "xobjects": 9,
+    "pathBoxes": 432,
+    "pathClusters": 3,
+    "captions": [
+      "13",
+      "15",
+      "14"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          56.04,
+          204.69,
+          292.54,
+          260.97
+        ],
+        "caption": "14",
+        "kind": "form+path",
+        "placements": 3,
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0275
+      },
+      {
+        "rect": [
+          317.96,
+          204.69,
+          565.11,
+          259.55
+        ],
+        "caption": "15",
+        "kind": "form+path",
+        "placements": 2,
+        "confidence": 0.95,
+        "pageAreaRatio": 0.028
+      }
+    ],
+    "rejectedReasons": [
+      "no-figure-evidence",
+      "no-figure-evidence",
+      "no-figure-evidence",
+      "no-figure-evidence",
+      "no-figure-evidence",
+      "no-figure-evidence",
+      "extreme-aspect"
+    ],
+    "uncoveredCaptions": [
+      "13"
+    ]
+  },
+  {
+    "page": 11,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 11,
+    "xobjects": 8,
+    "pathBoxes": 113,
+    "pathClusters": 3,
+    "captions": [
+      "17",
+      "16",
+      "18"
+    ],
+    "accepted": [
+      {
+        "rect": [
+          56.04,
+          83.69,
+          302.64,
+          142.79
+        ],
+        "caption": "16",
+        "kind": "form",
+        "placements": 2,
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0301
+      },
+      {
+        "rect": [
+          320.2,
+          83.69,
+          566.8,
+          136.28
+        ],
+        "caption": "17",
+        "kind": "form",
+        "placements": 2,
+        "confidence": 0.95,
+        "pageAreaRatio": 0.0268
+      },
+      {
+        "rect": [
+          320.2,
+          261.11,
+          556.7,
+          369.86
+        ],
+        "caption": "18",
+        "kind": "form+path",
+        "placements": 3,
+        "confidence": 0.9,
+        "pageAreaRatio": 0.0531
+      }
+    ],
+    "rejectedReasons": [
+      "no-figure-evidence",
+      "no-figure-evidence",
+      "extreme-aspect",
+      "below-min-area"
+    ],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 12,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 13,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  },
+  {
+    "page": 14,
+    "pageSize": [
+      612,
+      792
+    ],
+    "placements": 0,
+    "xobjects": 0,
+    "pathBoxes": 0,
+    "pathClusters": 0,
+    "captions": [],
+    "accepted": [],
+    "rejectedReasons": [],
+    "uncoveredCaptions": []
+  }
+]
