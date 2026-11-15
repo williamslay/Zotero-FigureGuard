@@ -115,6 +115,29 @@ export const DEFAULT_DETECTOR_OPTIONS = Object.freeze({
   pathMergeMaxPasses: 30,
   /** A path cluster with no caption or tag still counts above this area. */
   pathAnchoredAreaRatio: 0.015,
+  /**
+   * Edge-to-edge distance within which two equal panels count as members of
+   * one figure grid (see `rescuePanelGrids`). Swept on the HiKV fixture, whose
+   * figures 7-9 are rows and grids of same-size plot panels: inside a figure
+   * the panel gaps are 34.83, 37.31, 38.0 and 44.94 pt and must chain, while
+   * the 80.55 pt between figure 8's row and figure 9's row - caption 8 sits in
+   * it - must not. 60 pt sits 13 pt clear of both sweeps' upper needs and 20 pt
+   * under the widest forbidden gap.
+   */
+  panelPeerGapPt: 60,
+  /**
+   * Width/height disagreement below which two boxes are the same panel size.
+   * HiKV panels agree within 2.9 %; the two FluidKV page-7 fragments (24x117
+   * and 35x142) disagree by 45.8 % in width and must stay unmerged.
+   */
+  panelSizeToleranceRatio: 0.15,
+  /**
+   * Fraction of the shorter side two panels must overlap along the shared axis
+   * before a gap counts as inside-grid: stacked panels overlap in x, side by
+   * side panels in y. HiKV grids overlap at ~1.0; a stray box diagonally
+   * placed should not chain.
+   */
+  panelAlignOverlapRatio: 0.6,
   /** Page inset used for the "inside margins" confidence bonus. */
   marginInsetPt: 12,
   minAspect: 0.15,

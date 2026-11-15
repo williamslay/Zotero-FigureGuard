@@ -340,6 +340,16 @@ function mergePathPlacements(paths, pageRect, options, captions) {
   // once the off-page paths are gone. A caption row *inside* a cluster is the
   // evidence that two figures met there, so split along it (see
   // splitAtInteriorCaptions).
+  // Same-size panels set in a grid are one figure's subfigures, but their
+  // gutters (34.83 to 44.94 pt on the HiKV fixture) are past the generic
+  // 17.9 pt chain, so each panel died alone on the anchored-area gate and
+  // figures 7, 8 and 9 went unpainted. Chain small clusters that repeat at
+  // one size and share an axis up to `panelPeerGapPt`; clusters big enough to
+  // stand alone never take part, so no finished figure grows into a neighbour,
+  // and a caption row trapped inside the grid is split out below exactly as
+  // an over-chained cluster is.
+  boxes = mergePanelGrids(boxes, pageRect, options);
+
   const split = splitAtInteriorCaptions(boxes, captions ?? [], pageRect, tolerance, options);
 
   // Re-attach the frames as evidence, without letting them decide extent: a
@@ -416,6 +426,92 @@ function mergePass(boxes, tolerance) {
     group.depth = Math.min(group.depth, box.depth);
   }
   return [...groups.values()];
+}
+
+/**
+ * Chain the equal-size, axis-aligned panels of a subfigure grid into one
+ * candidate. Two clusters are peers when both are below
+ * `pathAnchoredAreaRatio` (only clusters that could never stand alone merge),
+ * their widths and heights agree within `panelSizeToleranceRatio`, they
+ * overlap at least `panelAlignOverlapRatio` of the shorter side along the
+ * shared axis, and the edge-to-edge gap along the other axis is at most
+ * `panelPeerGapPt`. Transitive, like the generic sweep, so a 3x2 grid of
+ * panels becomes a single figure.
+ *
+ * @param {Array<object>} boxes Cluster boxes carrying `members`.
+ * @param {number[]} pageRect
+ * @param {object} options
+ * @returns {Array<object>} boxes with panel grids chained
+ */
+function mergePanelGrids(boxes, pageRect, options) {
+  if (boxes.length < 2 || !(options.panelPeerGapPt > 0)) return boxes;
+  const small = boxes.map(
+    (box) => areaRatioOf(box.rect, pageRect) < options.pathAnchoredAreaRatio,
+  );
+  const parent = boxes.map((_, index) => index);
+  const find = (index) => {
+    while (parent[index] !== index) {
+      parent[index] = parent[parent[index]];
+      index = parent[index];
+    }
+    return index;
+  };
+  for (let i = 0; i < boxes.length; i++) {
+    if (!small[i]) continue;
+    for (let j = i + 1; j < boxes.length; j++) {
+      if (!small[j]) continue;
+      const left = find(i);
+      const right = find(j);
+      if (left === right) continue;
+      // Peer test on the ORIGINAL panel rects: a chained group's union is
+      // wider than one panel and would fail the equal-size test against the
+      // next panel, stalling the sweep halfway across the grid.
+      if (panelPeer(boxes[i].rect, boxes[j].rect, options)) parent[right] = left;
+    }
+  }
+
+  const groups = new Map();
+  for (const [index, box] of boxes.entries()) {
+    const root = find(index);
+    const group = groups.get(root);
+    if (!group) {
+      groups.set(root, {
+        rect: [...box.rect],
+        mergedCount: box.mergedCount,
+        members: box.members ? box.members.map((member) => [...member]) : [[...box.rect]],
+        opIndex: box.opIndex,
+        depth: box.depth,
+      });
+      continue;
+    }
+    group.rect = unionRect(group.rect, box.rect);
+    group.mergedCount += box.mergedCount;
+    for (const member of box.members ?? [box.rect]) group.members.push([...member]);
+    if (box.opIndex != null && (group.opIndex == null || box.opIndex < group.opIndex)) {
+      group.opIndex = box.opIndex;
+    }
+    group.depth = Math.min(group.depth, box.depth);
+  }
+  return [...groups.values()];
+}
+
+/** Would these two rects be two panels of one grid? See `mergePanelGrids`. */
+function panelPeer(a, b, options) {
+  const aw = rectWidth(a);
+  const ah = rectHeight(a);
+  const bw = rectWidth(b);
+  const bh = rectHeight(b);
+  const sizeTolerance = options.panelSizeToleranceRatio;
+  if (Math.abs(aw - bw) > sizeTolerance * Math.max(aw, bw)) return false;
+  if (Math.abs(ah - bh) > sizeTolerance * Math.max(ah, bh)) return false;
+  const overlapX = Math.min(a[2], b[2]) - Math.max(a[0], b[0]);
+  const overlapY = Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
+  const gapX = Math.max(b[0] - a[2], a[0] - b[2], 0);
+  const gapY = Math.max(b[1] - a[3], a[1] - b[3], 0);
+  const align = options.panelAlignOverlapRatio;
+  if (overlapY >= align * Math.min(ah, bh)) return gapX <= options.panelPeerGapPt;
+  if (overlapX >= align * Math.min(aw, bw)) return gapY <= options.panelPeerGapPt;
+  return false;
 }
 
 /**

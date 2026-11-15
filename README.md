@@ -2,12 +2,12 @@
 
 Zotero 10 原生 PDF 阅读器的深色主题会把整页反色：文字变白是对的，彩色图表却跟着变成灰白轮廓。FigureGuard 自动识别页面里的图表区域，把这些区域恢复为 PDF 原始颜色，其余部分保持深色主题。不修改 PDF 文件，不依赖 Reading Mode，不改 Zotero 的排版。
 
-> 版本 0.1.30。插件 ID `figure-color-preservation@local`，兼容 Zotero 7–10（真机验证：Zotero 10.0.8 / Windows）。
+> 版本 0.1.31。插件 ID `figure-color-preservation@local`，兼容 Zotero 7–10（真机验证：Zotero 10.0.8 / Windows）。
 
 ## 它做什么
 
 - 在 reader 渲染的每一页上自动检测「图表区域」（矢量路径与 Form XObject 构成的插图），在检测到的矩形上叠加原色画布，白底显示图内内容。
-- 检测基于 pdf.js 的 `getOperatorList()`：按绘图指令聚类出路径与 XObject 边界，再过滤满页边框、装饰线、文字下划线等噪声。规则以四篇体系结构论文的 accepted 区域集合为基线逐字节钉死。
+- 检测基于 pdf.js 的 `getOperatorList()`：按绘图指令聚类出路径与 XObject 边界，再过滤满页边框、装饰线、文字下划线等噪声。等大的子图面板（网格/成行排布）会链成同一张图。规则以五篇体系结构论文的 accepted 区域集合为基线逐字节钉死。
 - 缩放、翻页、窗口变化后自动重画；多页签切换自动跟随；区域按「条目 + 文档指纹」缓存，重复打开不重新检测。
 - 工具栏开关一键启停。
 
@@ -21,7 +21,7 @@ Zotero 10 原生 PDF 阅读器的深色主题会把整页反色：文字变白�
 
 ```bash
 npm install
-npm run build   # → dist/figure-color-preservation-0.1.30.xpi
+npm run build   # → dist/figure-color-preservation-0.1.31.xpi
 ```
 
 ## 工作原理（简）
@@ -34,7 +34,7 @@ npm run build   # → dist/figure-color-preservation-0.1.30.xpi
 
 ```bash
 npm install
-npm test        # 399 个用例 / 66 个 suite（node:test，含 reports/*.json 基线逐字节校验）
+npm test        # 426 个用例 / 74 个 suite（node:test，含 reports/*.json 基线逐字节校验）
 npm run build   # → dist/ 下打包 xpi
 ```
 

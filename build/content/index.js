@@ -159,6 +159,29 @@ var FigureColorPlugin = (() => {
     pathMergeMaxPasses: 30,
     /** A path cluster with no caption or tag still counts above this area. */
     pathAnchoredAreaRatio: 0.015,
+    /**
+     * Edge-to-edge distance within which two equal panels count as members of
+     * one figure grid (see `rescuePanelGrids`). Swept on the HiKV fixture, whose
+     * figures 7-9 are rows and grids of same-size plot panels: inside a figure
+     * the panel gaps are 34.83, 37.31, 38.0 and 44.94 pt and must chain, while
+     * the 80.55 pt between figure 8's row and figure 9's row - caption 8 sits in
+     * it - must not. 60 pt sits 13 pt clear of both sweeps' upper needs and 20 pt
+     * under the widest forbidden gap.
+     */
+    panelPeerGapPt: 60,
+    /**
+     * Width/height disagreement below which two boxes are the same panel size.
+     * HiKV panels agree within 2.9 %; the two FluidKV page-7 fragments (24x117
+     * and 35x142) disagree by 45.8 % in width and must stay unmerged.
+     */
+    panelSizeToleranceRatio: 0.15,
+    /**
+     * Fraction of the shorter side two panels must overlap along the shared axis
+     * before a gap counts as inside-grid: stacked panels overlap in x, side by
+     * side panels in y. HiKV grids overlap at ~1.0; a stray box diagonally
+     * placed should not chain.
+     */
+    panelAlignOverlapRatio: 0.6,
     /** Page inset used for the "inside margins" confidence bonus. */
     marginInsetPt: 12,
     minAspect: 0.15,
@@ -618,6 +641,7 @@ var FigureColorPlugin = (() => {
       if (next.length === boxes.length) break;
       boxes = next;
     }
+    boxes = mergePanelGrids(boxes, pageRect, options);
     const split = splitAtInteriorCaptions(boxes, captions ?? [], pageRect, tolerance, options);
     const unmatchedFrames = frames.filter(
       (frame) => !split.boxes.some((box) => gapWithin(box.rect, frame.rect, tolerance))
@@ -683,6 +707,70 @@ var FigureColorPlugin = (() => {
       group.depth = Math.min(group.depth, box.depth);
     }
     return [...groups.values()];
+  }
+  function mergePanelGrids(boxes, pageRect, options) {
+    if (boxes.length < 2 || !(options.panelPeerGapPt > 0)) return boxes;
+    const small = boxes.map(
+      (box) => areaRatioOf(box.rect, pageRect) < options.pathAnchoredAreaRatio
+    );
+    const parent = boxes.map((_, index) => index);
+    const find = (index) => {
+      while (parent[index] !== index) {
+        parent[index] = parent[parent[index]];
+        index = parent[index];
+      }
+      return index;
+    };
+    for (let i = 0; i < boxes.length; i++) {
+      if (!small[i]) continue;
+      for (let j = i + 1; j < boxes.length; j++) {
+        if (!small[j]) continue;
+        const left = find(i);
+        const right = find(j);
+        if (left === right) continue;
+        if (panelPeer(boxes[i].rect, boxes[j].rect, options)) parent[right] = left;
+      }
+    }
+    const groups = /* @__PURE__ */ new Map();
+    for (const [index, box] of boxes.entries()) {
+      const root = find(index);
+      const group = groups.get(root);
+      if (!group) {
+        groups.set(root, {
+          rect: [...box.rect],
+          mergedCount: box.mergedCount,
+          members: box.members ? box.members.map((member) => [...member]) : [[...box.rect]],
+          opIndex: box.opIndex,
+          depth: box.depth
+        });
+        continue;
+      }
+      group.rect = unionRect(group.rect, box.rect);
+      group.mergedCount += box.mergedCount;
+      for (const member of box.members ?? [box.rect]) group.members.push([...member]);
+      if (box.opIndex != null && (group.opIndex == null || box.opIndex < group.opIndex)) {
+        group.opIndex = box.opIndex;
+      }
+      group.depth = Math.min(group.depth, box.depth);
+    }
+    return [...groups.values()];
+  }
+  function panelPeer(a, b, options) {
+    const aw = rectWidth(a);
+    const ah = rectHeight(a);
+    const bw = rectWidth(b);
+    const bh = rectHeight(b);
+    const sizeTolerance = options.panelSizeToleranceRatio;
+    if (Math.abs(aw - bw) > sizeTolerance * Math.max(aw, bw)) return false;
+    if (Math.abs(ah - bh) > sizeTolerance * Math.max(ah, bh)) return false;
+    const overlapX = Math.min(a[2], b[2]) - Math.max(a[0], b[0]);
+    const overlapY = Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
+    const gapX = Math.max(b[0] - a[2], a[0] - b[2], 0);
+    const gapY = Math.max(b[1] - a[3], a[1] - b[3], 0);
+    const align = options.panelAlignOverlapRatio;
+    if (overlapY >= align * Math.min(ah, bh)) return gapX <= options.panelPeerGapPt;
+    if (overlapX >= align * Math.min(aw, bw)) return gapY <= options.panelPeerGapPt;
+    return false;
   }
   function splitAtInteriorCaptions(boxes, captions, pageRect, tolerance, options) {
     if (!boxes.some((box) => (box.members?.length ?? 0) > 1)) {
