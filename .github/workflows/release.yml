@@ -1,8 +1,9 @@
 name: Release
 
 # Publishing is tag driven. One tag means one version, and nothing here bumps a
-# version or commits code. workflow_dispatch is only a retry door for a tag that
-# already exists.
+# version or commits code. A version tag pushed to this repository is a formal
+# release. workflow_dispatch is a retry door for a tag that already exists, and
+# the only place a pre-release mark can be requested.
 on:
   push:
     tags:
@@ -10,10 +11,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing version tag to publish, for example v0.1.31'
-        default: v0.1.31
+        description: 'Existing version tag to publish, for example v0.5.0'
+        default: v0.5.0
         required: true
         type: string
+      prerelease:
+        description: 'Mark the published release as a pre-release'
+        required: false
+        type: boolean
+        default: false
 
 # Only the release job gets write access, and only on a controlled version tag.
 # The built-in GITHUB_TOKEN is enough: no Personal Access Token is required.
@@ -39,6 +45,23 @@ jobs:
             exit 1
           fi
 
+      # gh is preinstalled on the runner. Checking the tag through the API turns a
+      # mistyped tag into a message that lists the tags which really exist, instead
+      # of a confusing checkout error.
+      - name: Check that the tag exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG exists."
+          else
+            tags="$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+              --jq '[.[].ref | sub("refs/tags/"; "")] | join(", ")')"
+            echo "::error::Tag $TAG does not exist on the remote. Existing version tags: $tags"
+            exit 1
+          fi
+
       - name: Check out the tagged commit
         # fetch-depth 0 so the job can test whether the tag sits in main's history.
         # The repository is small, so a full clone is cheap.
@@ -54,7 +77,7 @@ jobs:
           sha="$(git rev-list -n 1 "$TAG")"
           echo "Tag $TAG resolves to $sha"
           if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
-            echo "::error::Tag $TAG is not part of main's history. Release from main, not from dev."
+            echo "::error::Tag $TAG is not part of main's history. Release from main, not from the internal archive branch."
             exit 1
           fi
 
@@ -81,6 +104,8 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Empty on a tag push, so a pushed version tag is always a formal release.
+          PRERELEASE: ${{ github.event.inputs.prerelease }}
         run: |
           set -eu
           version="${TAG#v}"
@@ -90,9 +115,9 @@ jobs:
             exit 1
           fi
           args=("$TAG" "$xpi" dist/SHA256SUMS.txt --verify-tag --generate-notes)
-          case "$version" in
-            0.*) args+=(--prerelease) ;;
-          esac
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
           gh release create "${args[@]}"
           gh release view "$TAG" --json tagName,prerelease,assets \
             --jq '"Published \(.tagName) (prerelease: \(.prerelease)) with assets: \([.assets[].name] | join(", "))"'

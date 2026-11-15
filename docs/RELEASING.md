@@ -1,71 +1,87 @@
 # Releasing FigureGuard
 
-This guide covers publishing a version of FigureGuard as a GitHub Release with a
-downloadable `.xpi`. Version numbers are bumped by hand. No workflow bumps the
-version, and no workflow publishes on every push to `main`.
+This guide covers the branch model, how a version number is chosen, and how a
+version becomes a GitHub Release with a downloadable `.xpi`. Version numbers are
+bumped by hand. No workflow bumps a version, and no workflow publishes on every
+push to `main`.
 
 ## Branches
 
-| Branch | Contents |
+| Branch | Purpose |
 | --- | --- |
-| `main` | Public release branch. Source, tests, user-facing docs. Tags live here. |
-| `dev` | Full development history, including internal design notes and the round-by-round log in `reports/`. |
+| `main` | The only long-lived public branch. Source, tests, user-facing docs. Version tags live here. |
+| `feature/*` | Short-lived branch cut from `main` for one feature. Opened as a pull request, merged with CI green, then deleted. |
+| `internal` | Archive of the pre-open-source history, including the internal design notes in `docs/` and the round-by-round log in `reports/`. Not built by CI. |
 
-Land work on `dev`, then sync it to `main` before tagging. The two branches have
-separate histories, so sync by cherry-pick or by squashing `dev` into one commit
-on `main`.
+The work flow for a feature:
 
-## When to bump the version
+1. `git switch -c feature/<topic>` from an up to date `main`.
+2. Develop and push, then open a pull request into `main`. The pull request runs
+   the CI gate.
+3. Merge. The merge commit runs CI again on `main`. Delete the feature branch.
+4. Install the CI artifact on a real Zotero and accept the feature.
 
-- Detection or rendering behaviour that a user can notice: bump the patch number
-  (`0.1.31` → `0.1.32`).
-- New user-facing feature: bump the minor number while the major stays `0`.
-- A breaking change in the installed add-on, such as a new minimum Zotero
-  version: bump to `0.2.0` or `1.0.0`.
-- A CI, documentation, or tooling-only change does not need a new release unless
-  you want to re-package the add-on.
+## How a version number is chosen
+
+A version number follows a feature, not a build. Merging does not consume a
+version, and neither does installing a test build.
+
+- Cut a release when a set of merged features has been accepted on a real Zotero
+  installation.
+- New user-facing features: raise the minor number. A fix on top of a released
+  version: raise the patch number. `v0.6.0` then `v0.6.1`.
+- Test builds need no version of their own. Every pull request and every merge to
+  `main` stores a CI artifact named after the run and the commit, for example
+  `figure-color-preservation-run12-1a2b3c4`. Install that artifact to try a
+  feature before it is released.
 
 One tag means one version. Never re-point an existing tag at different code, and
 never re-use a version number.
 
 ## Update the version fields
 
-Four values must agree. For version `0.1.32`:
+Four values must agree. For version `0.6.0`:
 
 | Place | Field |
 | --- | --- |
-| Git tag | `v0.1.32` |
-| `package.json` | `"version": "0.1.32"` |
+| Git tag | `v0.6.0` |
+| `package.json` | `"version": "0.6.0"` |
 | `package-lock.json` | top-level `"version"` and `packages[""].version` |
-| `manifest.json` | `"version": "0.1.32"` |
+| `manifest.json` | `"version": "0.6.0"` |
 
 Run:
 
 ```bash
-npm version 0.1.32 --no-git-tag-version --allow-same-version=false
+npm version 0.6.0 --no-git-tag-version
 ```
 
 That updates `package.json` and `package-lock.json` only. Then edit
-`manifest.json` by hand. `npm run build` refuses to package when these files
+`manifest.json` by hand. `npm run build` refuses to package when these four
 disagree, and the Release workflow checks the tag against them too.
 
 The add-on ID in `manifest.json` (`figure-color-preservation@local`) does not
 change between releases.
+
+`.github/workflows/release.yml` carries a default value for the manual `tag`
+input. It is a convenience for the run dialog only. Update it when it becomes
+stale, or type the tag by hand when you start the workflow.
 
 ## Run the local checks
 
 `zip` and `unzip` must be installed. On Debian or Ubuntu: `sudo apt install zip unzip`.
 
 ```bash
-npm ci                 # install exactly what package-lock.json pins
-npm run test:ci        # PDF-free suite; must report 0 cancelled
-npm test               # full regression, needs the five fixture PDFs (see README)
-npm run build          # → dist/figure-color-preservation-<version>.xpi
-node scripts/verify-xpi.mjs
+npm ci                                        # install exactly what package-lock.json pins
+npm run test:ci                               # PDF-free suite; must report 0 cancelled
+npm test                                      # full regression, needs the five fixture PDFs
+npm run build                                 # → dist/figure-color-preservation-0.6.0.xpi
+node scripts/verify-xpi.mjs --expect-version 0.6.0
 ```
 
 `scripts/verify-xpi.mjs` inspects the built archive, prints its SHA-256, and
-writes `dist/SHA256SUMS.txt`. Any failed check exits non-zero.
+writes `dist/SHA256SUMS.txt`. Any failed check exits non-zero. The archive is not
+byte-reproducible, because `zip` stores a timestamp, so the hash belongs to the
+build that produced it.
 
 ## Create and push the tag
 
@@ -73,65 +89,83 @@ Commit the version bump on `main`, push it, then tag the pushed commit:
 
 ```bash
 git switch main
-git commit -am "chore: release 0.1.32"
+git commit -am "chore: release 0.6.0"
 git push origin main
-git tag -a v0.1.32 -m "Zotero FigureGuard 0.1.32"
-git push origin v0.1.32
+git tag -a v0.6.0 -m "Zotero FigureGuard 0.6.0"
+git push origin v0.6.0
 ```
 
-Pushing the tag is what starts the Release workflow. The workflow refuses to
-publish a tag that is not part of `main`'s history, so tagging a `dev` commit
-fails fast instead of releasing unreleased code.
+Pushing the tag is what starts the Release workflow. The workflow refuses a tag
+that is not part of `main`'s history, so tagging a commit on another branch fails
+fast instead of releasing code nobody merged.
+
+## What the Release workflow does
+
+1. Checks the tag name has the form `vMAJOR.MINOR.PATCH`.
+2. Checks the tag exists on the remote. A mistyped tag fails here and the error
+   lists the version tags that really exist.
+3. Checks out the tag and refuses a tag outside `main`'s history.
+4. Runs `npm ci`, `npm run test:ci`, and `npm run build`.
+5. Verifies the archive and the four version fields, and writes
+   `dist/SHA256SUMS.txt`.
+6. Refuses to publish when a release for the tag already exists, so an existing
+   release is never silently overwritten.
+7. Runs `gh release create <tag> <xpi> dist/SHA256SUMS.txt --verify-tag
+   --generate-notes`.
+
+A version tag pushed to the repository is published as a **formal** release. To
+publish a pre-release, start the workflow by hand — **Actions** → **Release** →
+**Run workflow** — and tick **Mark the published release as a pre-release**. To
+change the mark afterwards: `gh release edit v0.6.0 --prerelease` or
+`gh release edit v0.6.0 --release`.
 
 ## Watch the workflow
 
 GitHub → the repository → **Actions** tab → **Release** in the left sidebar → the
-run named `v0.1.32`.
+run named `v0.6.0`.
 
 - Green: the release exists.
 - Red: open the failed job and read the step name. The version-consistency step
   prints every field and value it compared.
 
-The CI workflow runs on every pull request and on every push to `main` or `dev`.
-It builds the XPI and stores it as an Actions artifact, but it never creates a
+The CI workflow runs on every pull request into `main` and on every push to
+`main`. It builds the XPI and stores it as a CI artifact, but it never creates a
 release.
 
 ## Verify the release
 
-On the release page for `v0.1.32` you should see exactly two assets:
+On the release page for `v0.6.0` you should see exactly two assets:
 
 ```text
-figure-color-preservation-0.1.32.xpi
+figure-color-preservation-0.6.0.xpi
 SHA256SUMS.txt
 ```
-
-While the project is in `0.1.x`, the release is marked **Pre-release**. Stable
-releases are marked the ordinary way.
 
 Check the download locally:
 
 ```bash
 sha256sum -c SHA256SUMS.txt          # run in the directory holding both files
-unzip -l figure-color-preservation-0.1.32.xpi
+unzip -l figure-color-preservation-0.6.0.xpi
 ```
 
 The archive must contain only `manifest.json`, `bootstrap.js`, and
 `content/index.js`. Install it through Zotero → Tools → Add-ons → gear icon →
 **Install Plugin From File…**, then confirm the add-on manager lists
-`Figure Color Preservation` at version `0.1.32`.
+`Figure Color Preservation` at version `0.6.0`.
 
 ## When a release fails
 
 | Situation | What to do |
 | --- | --- |
+| `Tag vX.Y.Z does not exist on the remote` | The manual input was mistyped. Run the workflow again with a tag from the list in the error message. |
 | Version fields disagree | Fix the fields on `main`, commit, move your new tag to that commit, push again. |
 | Test step is red | Fix the tests on `main`, then tag a new version. Do not push a second tag for the same version. |
-| Release with the same name already exists | `gh release view v0.1.32` shows it. Delete it with `gh release delete v0.1.32 --yes` (this keeps the tag), or use a new version number. The workflow does not overwrite an existing release's assets. |
+| Release with the same name already exists | `gh release view v0.6.0` shows it. Delete it with `gh release delete v0.6.0 --yes` (this keeps the tag), or use a new version number. The workflow never overwrites an existing release's assets. |
 | `GITHUB_TOKEN` lacks write access | See the settings below. |
-| Tag pointed at the wrong commit | Delete the tag locally and remotely (`git push origin :refs/tags/v0.1.32`), then re-tag the right commit — only while no release has been published from it. |
+| Tag pointed at the wrong commit | Delete the tag locally and remotely (`git push origin :refs/tags/v0.6.0`), then re-tag the right commit — only while no release has been published from it. |
 
 To retry publishing without pushing a new tag, use **Actions** → **Release** →
-**Run workflow**, and type the existing tag name (for example `v0.1.32`) into the
+**Run workflow**, and type the existing tag name (for example `v0.6.0`) into the
 `tag` input. That is the only manual entry point, and it never creates a tag.
 
 ## GitHub settings

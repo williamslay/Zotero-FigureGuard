@@ -1,7 +1,7 @@
 # Zotero FigureGuard
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.1.31-blue?style=flat-square">
+  <img alt="version" src="https://img.shields.io/badge/version-0.5.0-blue?style=flat-square">
   <img alt="Zotero 7–10" src="https://img.shields.io/badge/Zotero-7--10-orange?style=flat-square">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green?style=flat-square">
   <img alt="CI" src="https://github.com/williamslay/Zotero-FigureGuard/actions/workflows/ci.yml/badge.svg?branch=main">
@@ -11,7 +11,7 @@
 
 Zotero 原生 PDF 阅读器的深色主题会把整页反色：文字变白是对的，彩色图表却跟着变成灰白轮廓。FigureGuard 自动检测页面中的图表区域，只把这些区域恢复为 PDF 的原始颜色，其余部分保持深色。不修改 PDF 文件，不依赖 Reading Mode，不改变 Zotero 的排版。
 
-> 状态：预览版 0.1.31。真机验证环境为 Zotero 10.0.8 / Windows。
+> 状态：0.5.0。真机验证环境为 Zotero 10.0.8 / Windows。
 
 <p align="center">
   <img src="./assets/example-figure-2.png" width="440" alt="检测出的图表区域按 PDF 原始颜色渲染">
@@ -25,7 +25,7 @@ Zotero 原生 PDF 阅读器的深色主题会把整页反色：文字变白是�
 - [安装](#安装)
 - [从源码构建](#从源码构建)
 - [运行测试](#运行测试)
-- [CI 与发布](#ci-与发布)
+- [开发与发布流程](#开发与发布流程)
 - [工作原理](#工作原理)
 - [目录结构](#目录结构)
 - [诊断](#诊断)
@@ -54,7 +54,7 @@ Zotero 原生 PDF 阅读器的深色主题会把整页反色：文字变白是�
 ```bash
 npm ci
 npm run test:ci
-npm run build   # → dist/figure-color-preservation-0.1.31.xpi
+npm run build   # → dist/figure-color-preservation-0.5.0.xpi
 ```
 
 构建需要系统命令 `zip` 与 `unzip`（Linux：`sudo apt install zip unzip`）。`build/`（打包暂存目录）和 `dist/`（xpi 与 `SHA256SUMS.txt`）都是生成产物，不入库。
@@ -97,15 +97,27 @@ fixture/PipeBWrite.pdf
 
 完整回归共 23 个文件、459 个用例。缺少这些 PDF 时，`npm test` 会得到 380 通过、79 取消（cancelled）、0 失败：被取消的 79 个用例来自 7 个依赖真实 PDF 的测试文件，它们的 `before` 钩子打不开文件。`npm run test:ci` 会跳过这 7 个文件，所以公开 CI 里不会出现「大量 cancelled 冒充通过」。完整回归只在维护者本地跑，不作为公开 CI 的强制门槛。
 
-## CI 与发布
+## 开发与发布流程
+
+`main` 是唯一的长期分支。功能的走法：
+
+1. 从最新的 `main` 切出 `feature/<主题>` 分支。
+2. 开发、推送，向 `main` 开 pull request。PR 触发 CI 门禁。
+3. 合并。合并提交在 `main` 上再跑一次 CI，然后删掉 feature 分支。
+4. 装上这次合并产出的 CI Artifact，在真机 Zotero 上验收该功能。
+
+版本号跟着功能走，不跟着构建走：
+
+- 合并功能不消耗版本号，测试构建也不需要单独的版本号。每次 PR 与每次合并到 `main` 都会存一个以运行号加短 SHA 命名的 Artifact，例如 `figure-color-preservation-run12-1a2b3c4`，直接装它试功能。
+- 一组已合并的功能在真机验收通过后，才切一个版本：新功能升 minor（`v0.6.0`），已发布版本上的修补升 patch（`v0.6.1`）。
+- 一个 Tag 对应一个版本。已发布的 Tag 不移动、不复用。
 
 两条 GitHub Actions 工作流，都不需要额外的 Token 或外部服务器。
 
-- **CI** `.github/workflows/ci.yml`：pull request，以及推送到 `main` 或 `dev` 时触发。执行 `npm ci` → `npm run test:ci` → `npm run build` → XPI 校验，并把 xpi 与 `SHA256SUMS.txt` 存成 Actions Artifact 供下载。权限只有 `contents: read`，不发 Release。测试或构建失败即工作流失败。
-- **Release** `.github/workflows/release.yml`：推送 `v*` Tag 时触发。先确认该 Tag 位于 `main` 的历史中，再校验 Tag 与 `package.json`、`package-lock.json`、`manifest.json` 四处版本一致，然后测试、构建、校验 XPI，最后用 `gh release create --verify-tag --generate-notes` 创建 Release 并上传 xpi 与 `SHA256SUMS.txt`。0.1.x 版本标记为 Pre-release。权限为 `contents: write`，用的是自动提供的 `GITHUB_TOKEN`。
+- **CI** `.github/workflows/ci.yml`：pull request 与推送到 `main` 时触发。执行 `npm ci` → `npm run test:ci` → `npm run build` → XPI 校验，并把 xpi 与 `SHA256SUMS.txt` 存成 Actions Artifact 供下载。权限只有 `contents: read`，不发 Release。测试或构建失败即工作流失败。
+- **Release** `.github/workflows/release.yml`：推送 `v*` Tag 时触发。先确认该 Tag 存在且位于 `main` 的历史中，再校验 Tag 与 `package.json`、`package-lock.json`、`manifest.json` 四处版本一致，然后测试、构建、校验 XPI，最后用 `gh release create --verify-tag --generate-notes` 创建 Release 并上传 xpi 与 `SHA256SUMS.txt`。推送出去的版本 Tag 就是正式发布；需要 Pre-release 时，手动运行该工作流并勾选 pre-release 开关。权限为 `contents: write`，用的是自动提供的 `GITHUB_TOKEN`。
 
 版本号手动维护：CI 不会自动 bump，也不会在每次推送 `main` 时发版。发布步骤与失败处理见 [docs/RELEASING.md](./docs/RELEASING.md)。
-
 
 ## 工作原理
 
@@ -148,12 +160,13 @@ Zotero.getMainWindow().FigureColorPlugin.probeAll();
 - 规则按学术 PDF 的常见图表形态调校：矢量路径、Form XObject、双栏排版。纯位图扫描件与特殊着色方式尚未覆盖。
 - 图注与图相隔较远的排版、并排小图各自成带等边界情形，仍会漏检或并错。
 - 真机验证只在 Zotero 10.0.8 / Windows 完成。Zotero 大版本升级后 pdf.js 的内部结构可能变化，上面「诊断」一节列出的字段是排查入口。
-- 0.1.x 阶段：检测规则和对外接口都可能继续调整。
+- 0.x 阶段：检测规则和对外接口都可能继续调整。
 
 ## 分支说明
 
-- `main`：对外发布分支，只包含插件源码、测试与用户文档（`docs/` 里只发布 `RELEASING.md`），版本 Tag 都打在这里。
-- `dev`：完整开发分支，额外包含 `docs/`（规范与决策记录）和 `reports/`（逐轮开发日志、检测基线数据）。
+- `main`：唯一的长期公开分支，包含插件源码、测试与用户文档（`docs/` 里只发布 `RELEASING.md`），版本 Tag 都打在这里。
+- `feature/*`：从 `main` 切出的短期功能分支，开 PR 合入 `main` 后即删除。
+- `internal`：开源改造前的完整历史归档，额外包含 `docs/`（规范与决策记录）和 `reports/`（逐轮开发日志、检测基线数据），不参与 CI 构建。
 
 ## 许可
 

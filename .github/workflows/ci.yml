@@ -1,17 +1,16 @@
 name: CI
 
-# Runs on contribution traffic only: pull requests and pushes to the two
-# long-lived branches. Never publishes a release, so a red run cannot affect
-# what users download.
+# One long-lived branch: main. Contribution traffic is a pull request into main,
+# plus the push to main after a merge. The internal archive branch (internal)
+# holds the pre-open-source history and is not built here. Never publishes a
+# release, so a red run cannot affect what users download.
 on:
   pull_request:
     branches:
       - main
-      - dev
   push:
     branches:
       - main
-      - dev
   workflow_dispatch:
 
 # Read-only: CI must not be able to write to the repository or move a release.
@@ -29,6 +28,10 @@ jobs:
     steps:
       - name: Check out the commit
         uses: actions/checkout@v7 # v7 (node24 runtime)
+
+      - name: Resolve the short commit SHA
+        id: short_sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js
         uses: actions/setup-node@v7 # v7 (node24 runtime)
@@ -51,10 +54,14 @@ jobs:
       - name: Verify the XPI package
         run: node scripts/verify-xpi.mjs
 
+      # Every merge and every pull request produces a downloadable build, so a
+      # test build does not need its own version number. The run number and the
+      # short SHA in the artifact name tell the builds apart; the .xpi inside keeps
+      # the version from package.json.
       - name: Upload the XPI artifact
         uses: actions/upload-artifact@v7 # v7 (node24 runtime)
         with:
-          name: figure-color-preservation-xpi
+          name: figure-color-preservation-run${{ github.run_number }}-${{ steps.short_sha.outputs.short }}
           path: |
             dist/figure-color-preservation-*.xpi
             dist/SHA256SUMS.txt
