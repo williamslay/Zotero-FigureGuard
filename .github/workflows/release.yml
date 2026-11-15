@@ -109,7 +109,7 @@ jobs:
         run: |
           set -eu
           version="${TAG#v}"
-          xpi="dist/figure-color-preservation-${version}.xpi"
+          xpi="dist/zotero-figure-guard-${version}.xpi"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::error::Release $TAG already exists. Refusing to overwrite its assets. Delete it with 'gh release delete $TAG --yes' or publish a new version."
             exit 1

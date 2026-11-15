@@ -44,9 +44,9 @@ describe("parseArgs", () => {
 
 describe("archive file name", () => {
   it("round-trips the version", () => {
-    assert.equal(xpiFileName("0.1.31"), "figure-color-preservation-0.1.31.xpi");
-    assert.equal(versionFromFileName("figure-color-preservation-0.1.31.xpi"), "0.1.31");
-    assert.equal(versionFromFileName("/tmp/figure-color-preservation-1.2.3.xpi"), "1.2.3");
+    assert.equal(xpiFileName("0.1.31"), "zotero-figure-guard-0.1.31.xpi");
+    assert.equal(versionFromFileName("zotero-figure-guard-0.1.31.xpi"), "0.1.31");
+    assert.equal(versionFromFileName("/tmp/zotero-figure-guard-1.2.3.xpi"), "1.2.3");
   });
 
   it("returns null for a name without a version", () => {
@@ -69,22 +69,49 @@ describe("parseEntries", () => {
 });
 
 describe("diffEntries", () => {
+  it("expects the four shipped entries, including the icon", () => {
+    assert.deepEqual(EXPECTED_ENTRIES, [
+      "manifest.json",
+      "bootstrap.js",
+      "content/index.js",
+      "content/figureguard-icon.svg",
+    ]);
+  });
+
   it("accepts exactly the expected set", () => {
     assert.deepEqual(diffEntries([...EXPECTED_ENTRIES]), { missing: [], extra: [] });
   });
 
   it("is order independent", () => {
-    assert.deepEqual(diffEntries(["content/index.js", "bootstrap.js", "manifest.json"]), {
-      missing: [],
-      extra: [],
-    });
+    assert.deepEqual(
+      diffEntries([
+        "content/figureguard-icon.svg",
+        "content/index.js",
+        "bootstrap.js",
+        "manifest.json",
+      ]),
+      { missing: [], extra: [] },
+    );
   });
 
   it("reports a missing bundle", () => {
-    assert.deepEqual(diffEntries(["manifest.json", "bootstrap.js"]), {
-      missing: ["content/index.js"],
-      extra: [],
-    });
+    assert.deepEqual(
+      diffEntries(["manifest.json", "bootstrap.js", "content/figureguard-icon.svg"]),
+      {
+        missing: ["content/index.js"],
+        extra: [],
+      },
+    );
+  });
+
+  it("reports a missing icon entry", () => {
+    assert.deepEqual(
+      diffEntries(["manifest.json", "bootstrap.js", "content/index.js"]),
+      {
+        missing: ["content/figureguard-icon.svg"],
+        extra: [],
+      },
+    );
   });
 
   it("reports an extra entry", () => {
@@ -95,9 +122,32 @@ describe("diffEntries", () => {
   });
 
   it("rejects a bundle hidden under a directory", () => {
-    const { missing, extra } = diffEntries(["manifest.json", "bootstrap.js", "build/content/index.js"]);
+    const { missing, extra } = diffEntries([
+      "manifest.json",
+      "bootstrap.js",
+      "content/figureguard-icon.svg",
+      "build/content/index.js",
+    ]);
     assert.deepEqual(missing, ["content/index.js"]);
     assert.deepEqual(extra, ["build/content/index.js"]);
+  });
+});
+
+describe("the packaged icon entry", () => {
+  it("verifies as a complete four-entry archive: no missing, no extra, no strays", () => {
+    const names = [
+      "manifest.json",
+      "bootstrap.js",
+      "content/index.js",
+      "content/figureguard-icon.svg",
+    ];
+    assert.deepEqual(diffEntries(names), { missing: [], extra: [] });
+    assert.deepEqual(findStrayEntries(names), []);
+  });
+
+  it("fails verification when the icon entry is dropped", () => {
+    const names = ["manifest.json", "bootstrap.js", "content/index.js"];
+    assert.deepEqual(diffEntries(names).missing, ["content/figureguard-icon.svg"]);
   });
 });
 
@@ -132,8 +182,8 @@ describe("checksum line", () => {
   const hash = "a".repeat(64);
 
   it("uses two spaces and the basename only", () => {
-    const line = checksumLine(hash, "figure-color-preservation-0.1.31.xpi");
-    assert.equal(line, `${hash}  figure-color-preservation-0.1.31.xpi`);
+    const line = checksumLine(hash, "zotero-figure-guard-0.1.31.xpi");
+    assert.equal(line, `${hash}  zotero-figure-guard-0.1.31.xpi`);
     assert.match(line, /^[0-9a-f]{64}  [^/\s]+\.xpi$/);
   });
 

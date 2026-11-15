@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Zotero Figure Guard</title>
+  <desc id="desc">Purple shield protecting a simple scientific chart and picture in a dark document.</desc>
+  <rect width="256" height="256" rx="48" fill="#161823"/>
+  <!-- Single bold shield outline: readable even when scaled down -->
+  <path d="M128 28C108 43 83 54 48 63v60c0 58 27 90 80 112 53-22 80-54 80-112V63c-35-9-60-20-80-35Z"
+        fill="none" stroke="#9C5CF5" stroke-width="13" stroke-linejoin="round" stroke-linecap="round"/>
+  <!-- Two clean, abstract figure panels -->
+  <rect x="81" y="75" width="94" height="111" rx="11" fill="none" stroke="#F5F4FC" stroke-width="9"/>
+  <path d="M83 135h90" fill="none" stroke="#F5F4FC" stroke-width="9"/>
+  <!-- Bar chart -->
+  <rect x="98" y="111" width="12" height="15" rx="3" fill="#36D7E5"/>
+  <rect x="119" y="99" width="12" height="27" rx="3" fill="#36D7E5"/>
+  <rect x="140" y="89" width="12" height="37" rx="3" fill="#36D7E5"/>
+  <!-- Image: two mountains and a sun -->
+  <path d="M95 170l21-24 18 19 13-14 16 19Z" fill="#BDA2FA" stroke="#BDA2FA" stroke-linejoin="round" stroke-width="3"/>
+  <circle cx="151" cy="145" r="6" fill="#F5F4FC"/>
+</svg>

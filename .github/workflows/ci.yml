@@ -61,8 +61,8 @@ jobs:
       - name: Upload the XPI artifact
         uses: actions/upload-artifact@v7 # v7 (node24 runtime)
         with:
-          name: figure-color-preservation-run${{ github.run_number }}-${{ steps.short_sha.outputs.short }}
+          name: zotero-figure-guard-run${{ github.run_number }}-${{ steps.short_sha.outputs.short }}
           path: |
-            dist/figure-color-preservation-*.xpi
+            dist/zotero-figure-guard-*.xpi
             dist/SHA256SUMS.txt
           if-no-files-found: error

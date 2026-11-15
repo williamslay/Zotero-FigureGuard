@@ -1,11 +1,12 @@
 /**
- * Builds the installable XPI for the Figure Color Preservation extension.
+ * Builds the installable XPI for the Zotero Figure Guard extension.
  *
- * Layout of the archive (all three entries at the archive root, because the
+ * Layout of the archive (the loader entries sit at the archive root, because the
  * Zotero bootstrapped loader resolves rootURI + "bootstrap.js"):
  *   manifest.json
  *   bootstrap.js
  *   content/index.js   (esbuild bundle of src/zotero/main.js)
+ *   content/figureguard-icon.svg   (the add-on icon, from assets/)
  *
  * Run with: npm run build
  */
@@ -99,7 +100,7 @@ async function main() {
     outfile: path.join(buildDir, "content", "index.js"),
     bundle: true,
     format: "iife",
-    globalName: "FigureColorPlugin",
+    globalName: "FigureGuard",
     // esbuild target syntax has no dash: "firefox-115" is rejected as an
     // invalid version, so the Firefox 115 baseline is spelled "firefox115".
     target: ["firefox115"],
@@ -119,10 +120,33 @@ async function main() {
     copyFileSync(source, path.join(buildDir, file));
   }
 
-  // 4. Zip from inside build/ so the three entries land at the archive root.
-  const xpiName = `figure-color-preservation-${version}.xpi`;
+  // 3b. Stage the add-on icon into content/, where manifest.json's `icons`
+  // entries and the reader toolbar button both resolve it. The source is the
+  // single tracked copy in assets/, so a missing file is a broken build.
+  const iconSource = path.join(repoRoot, "assets", "figureguard-icon.svg");
+  if (!existsSync(iconSource)) {
+    throw new Error(
+      `Missing add-on icon: ${path.relative(repoRoot, iconSource)}. ` +
+        "The manifest icons entries and the toolbar button need assets/figureguard-icon.svg.",
+    );
+  }
+  const iconTarget = path.join(buildDir, "content", "figureguard-icon.svg");
+  rmSync(iconTarget, { force: true });
+  copyFileSync(iconSource, iconTarget);
+
+  // 4. Zip from inside build/ so the loader entries land at the archive root.
+  const xpiName = `zotero-figure-guard-${version}.xpi`;
   const xpiPath = path.join(distDir, xpiName);
-  const zipArgs = ["-r", "-X", "-q", xpiPath, "manifest.json", "bootstrap.js", "content/index.js"];
+  const zipArgs = [
+    "-r",
+    "-X",
+    "-q",
+    xpiPath,
+    "manifest.json",
+    "bootstrap.js",
+    "content/index.js",
+    "content/figureguard-icon.svg",
+  ];
   run("zip", zipArgs, buildDir);
   if (!existsSync(xpiPath)) throw new Error(`zip did not produce ${xpiPath}`);
 
@@ -137,7 +161,12 @@ async function main() {
     .split("\n")
     .filter((line) => entryLine.test(line))
     .map((line) => line.trim().split(/\s+/)[3]);
-  const expected = ["manifest.json", "bootstrap.js", "content/index.js"];
+  const expected = [
+    "manifest.json",
+    "bootstrap.js",
+    "content/index.js",
+    "content/figureguard-icon.svg",
+  ];
   const missing = expected.filter((name) => !names.includes(name));
   const extra = names.filter((name) => !expected.includes(name));
   if (missing.length || extra.length) {

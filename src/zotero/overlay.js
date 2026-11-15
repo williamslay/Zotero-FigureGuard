@@ -32,10 +32,10 @@ export const PAD_VIEWPORT = 1.6;
 export const OVERLAY_Z_INDEX = 3;
 
 /** Class name used to recognise our own canvases, for cleanup and debugging. */
-export const OVERLAY_CLASS = "fcp-overlay";
+export const OVERLAY_CLASS = "fg-overlay";
 
 /** Marks the canvas of a page whose raster could not be painted. */
-export const ERROR_CLASS = "fcp-error";
+export const ERROR_CLASS = "fg-error";
 
 const warnedSites = new Set();
 /** Ring of recent warnings, readable from Run JavaScript. */

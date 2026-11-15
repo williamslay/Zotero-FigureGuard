@@ -285,7 +285,7 @@ describe("paint probe: main.probePaint", () => {
 describe("paint probe: paint failure evidence", () => {
   it("carries the last paint error and the failed-canvas class", () => {
     const canvas = fakeCanvas();
-    canvas.classList = { contains: (name) => name === "fcp-error" };
+    canvas.classList = { contains: (name) => name === "fg-error" };
     const overlay = fakeOverlay([canvas]);
     overlay.lastPaintError = "render: Cannot use the same canvas";
     const result = probeOverlay(overlay);

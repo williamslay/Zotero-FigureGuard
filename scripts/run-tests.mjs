@@ -1,5 +1,5 @@
 /**
- * Two-tier test runner for the Figure Color Preservation extension.
+ * Two-tier test runner for the Zotero Figure Guard extension.
  *
  * Tiers:
  *   ci   only the test files that need no PDF, so a clone without the

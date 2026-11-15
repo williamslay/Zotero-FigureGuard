@@ -1,4 +1,4 @@
-# Releasing FigureGuard
+# Releasing Zotero Figure Guard
 
 This guide covers the branch model, how a version number is chosen, and how a
 version becomes a GitHub Release with a downloadable `.xpi`. Version numbers are
@@ -32,7 +32,7 @@ version, and neither does installing a test build.
   version: raise the patch number. `v0.6.0` then `v0.6.1`.
 - Test builds need no version of their own. Every pull request and every merge to
   `main` stores a CI artifact named after the run and the commit, for example
-  `figure-color-preservation-run12-1a2b3c4`. Install that artifact to try a
+  `zotero-figure-guard-run12-1a2b3c4`. Install that artifact to try a
   feature before it is released.
 
 One tag means one version. Never re-point an existing tag at different code, and
@@ -59,7 +59,7 @@ That updates `package.json` and `package-lock.json` only. Then edit
 `manifest.json` by hand. `npm run build` refuses to package when these four
 disagree, and the Release workflow checks the tag against them too.
 
-The add-on ID in `manifest.json` (`figure-color-preservation@local`) does not
+The add-on ID in `manifest.json` (`figure-guard@zotero.org`) does not
 change between releases.
 
 `.github/workflows/release.yml` carries a default value for the manual `tag`
@@ -74,7 +74,7 @@ stale, or type the tag by hand when you start the workflow.
 npm ci                                        # install exactly what package-lock.json pins
 npm run test:ci                               # PDF-free suite; must report 0 cancelled
 npm test                                      # full regression, needs the five fixture PDFs
-npm run build                                 # → dist/figure-color-preservation-0.6.0.xpi
+npm run build                                 # → dist/zotero-figure-guard-0.6.0.xpi
 node scripts/verify-xpi.mjs --expect-version 0.6.0
 ```
 
@@ -91,7 +91,7 @@ Commit the version bump on `main`, push it, then tag the pushed commit:
 git switch main
 git commit -am "chore: release 0.6.0"
 git push origin main
-git tag -a v0.6.0 -m "Zotero FigureGuard 0.6.0"
+git tag -a v0.6.0 -m "Zotero Figure Guard 0.6.0"
 git push origin v0.6.0
 ```
 
@@ -138,7 +138,7 @@ release.
 On the release page for `v0.6.0` you should see exactly two assets:
 
 ```text
-figure-color-preservation-0.6.0.xpi
+zotero-figure-guard-0.6.0.xpi
 SHA256SUMS.txt
 ```
 
@@ -146,13 +146,14 @@ Check the download locally:
 
 ```bash
 sha256sum -c SHA256SUMS.txt          # run in the directory holding both files
-unzip -l figure-color-preservation-0.6.0.xpi
+unzip -l zotero-figure-guard-0.6.0.xpi
 ```
 
-The archive must contain only `manifest.json`, `bootstrap.js`, and
-`content/index.js`. Install it through Zotero → Tools → Add-ons → gear icon →
-**Install Plugin From File…**, then confirm the add-on manager lists
-`Figure Color Preservation` at version `0.6.0`.
+The archive must contain only `manifest.json`, `bootstrap.js`,
+`content/index.js`, and `content/figureguard-icon.svg`. Install it through
+Zotero → Tools → Add-ons → gear icon → **Install Plugin From File…**, then
+confirm the add-on manager lists `Zotero Figure Guard` at version `0.6.0`, with
+the shield icon beside the name.
 
 ## When a release fails
 
@@ -190,7 +191,7 @@ built-in `GITHUB_TOKEN`.
 ## In-app automatic updates
 
 `manifest.json` declares
-`"update_url": "https://www.zotero.org/update/figure-color-preservation"`. That
+`"update_url": "https://www.zotero.org/update/figure-guard"`. That
 path returns an HTML 404 page, not a JSON update manifest, so Zotero does not
 currently detect new GitHub Releases inside the app. Publishing to Releases is
 not the same as in-app auto-update. A future change can point `update_url` at a

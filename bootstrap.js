@@ -7,14 +7,14 @@
  * four plain global functions: startup(), shutdown(), install(), uninstall().
  *
  * At startup the bundled module (built by esbuild as an IIFE with the global
- * name FigureColorPlugin) is loaded into this same sandbox global, and its
+ * name FigureGuard) is loaded into this same sandbox global, and its
  * startup() is called. Nothing in here may throw: an exception escaping the
  * bootstrap takes the reader window with it, so every Zotero or Services
  * access is guarded and reported instead of propagated.
  */
 
 var FigureColorBootstrap = {
-  id: "figure-color-preservation@local",
+  id: "figure-guard@zotero.org",
   rootURI: "",
   started: false,
 };
@@ -68,12 +68,12 @@ function figureColorServices() {
  */
 function figureColorPlugin() {
   try {
-    if (globalThis.FigureColorPlugin) return globalThis.FigureColorPlugin;
+    if (globalThis.FigureGuard) return globalThis.FigureGuard;
   } catch (err) {
     figureColorWarn("plugin-global", err);
   }
   try {
-    if (typeof FigureColorPlugin !== "undefined") return FigureColorPlugin;
+    if (typeof FigureGuard !== "undefined") return FigureGuard;
   } catch (ignored) {
     // The bundle is not in scope yet.
   }
@@ -104,7 +104,7 @@ function figureColorPublish(plugin) {
       win = null;
     }
     if (!win) win = services.wm.getMostRecentWindow("navigator:browser");
-    if (win) win.FigureColorPlugin = plugin;
+    if (win) win.FigureGuard = plugin;
   } catch (err) {
     figureColorWarn("publish", err);
   }
@@ -134,12 +134,12 @@ function startup(data, reason) {
     }
 
     // One argument means "load into the caller's scope", which is this sandbox
-    // global: that is where the bundle publishes FigureColorPlugin.
+    // global: that is where the bundle publishes FigureGuard.
     services.scriptloader.loadSubScript(rootURI + "content/index.js");
 
     var plugin = figureColorPlugin();
     if (!plugin || typeof plugin.startup !== "function") {
-      figureColorWarn("startup: content/index.js did not define FigureColorPlugin.startup", null);
+      figureColorWarn("startup: content/index.js did not define FigureGuard.startup", null);
       return;
     }
     // The sandbox is not visible to Run JavaScript: publish the handle on the

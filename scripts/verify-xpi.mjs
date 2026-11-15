@@ -4,10 +4,11 @@
  * scripts/build.mjs plus node:crypto, so no extra dependencies.
  *
  * Checks: the file exists and is non-empty, the archive is a valid ZIP, it holds
- * exactly manifest.json, bootstrap.js and content/index.js at the expected
- * paths with nothing stray, the manifest inside agrees with the source manifest
- * (and with --expect-version when given), the file name matches the manifest
- * version, and dist/SHA256SUMS.txt is written in sha256sum text format.
+ * exactly manifest.json, bootstrap.js, content/index.js and
+ * content/figureguard-icon.svg at the expected paths with nothing stray, the
+ * manifest inside agrees with the source manifest (and with --expect-version
+ * when given), the file name matches the manifest version, and
+ * dist/SHA256SUMS.txt is written in sha256sum text format.
  *
  * Usage: node scripts/verify-xpi.mjs [--expect-version <version>] [--dist <dir>]
  *
@@ -29,6 +30,7 @@ export const EXPECTED_ENTRIES = Object.freeze([
   "manifest.json",
   "bootstrap.js",
   "content/index.js",
+  "content/figureguard-icon.svg",
 ]);
 
 /** Entry patterns that must never ship inside the XPI. */
@@ -71,7 +73,7 @@ export function parseArgs(argv) {
  * @returns {string} The archive name the build produces for that version.
  */
 export function xpiFileName(version) {
-  return `figure-color-preservation-${version}.xpi`;
+  return `zotero-figure-guard-${version}.xpi`;
 }
 
 /**
@@ -81,7 +83,7 @@ export function xpiFileName(version) {
  * @returns {string|null} The version, or null when the name does not match.
  */
 export function versionFromFileName(name) {
-  const match = /^figure-color-preservation-(.+)\.xpi$/.exec(path.basename(name));
+  const match = /^zotero-figure-guard-(.+)\.xpi$/.exec(path.basename(name));
   return match ? match[1] : null;
 }
 
@@ -226,7 +228,7 @@ async function main() {
   const listing = run("unzip", ["-Z1", xpiPath], repoRoot);
   const names = parseEntries(listing);
 
-  // 3. Exactly the three expected entries, nothing else.
+  // 3. Exactly the four expected entries, nothing else.
   const { missing, extra } = diffEntries(names);
   if (missing.length || extra.length) {
     throw new Error(
@@ -235,7 +237,8 @@ async function main() {
     );
   }
 
-  // 4 and 5. Root placement of the loader files, exact path of the bundle.
+  // 4 and 5. Root placement of the loader files, exact path of the bundle and
+  // of the icon the manifest icons entries and the toolbar button resolve.
   for (const rootEntry of ["manifest.json", "bootstrap.js"]) {
     if (!names.includes(rootEntry)) {
       const prefixed = names.filter((name) => name !== rootEntry && name.endsWith(`/${rootEntry}`));
@@ -250,6 +253,13 @@ async function main() {
     throw new Error(
       `content/index.js is not at that exact path in ${fileName} ` +
         `(entries: ${names.join(", ")}).`,
+    );
+  }
+  if (!names.includes("content/figureguard-icon.svg")) {
+    throw new Error(
+      `content/figureguard-icon.svg is not at that exact path in ${fileName} ` +
+        `(entries: ${names.join(", ")}). The manifest icons entries and the reader ` +
+        "toolbar button resolve rootURI + content/figureguard-icon.svg.",
     );
   }
 

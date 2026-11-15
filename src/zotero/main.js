@@ -1,6 +1,6 @@
 /**
  * Zotero integration entry point, bundled by esbuild as an IIFE published to
- * the sandbox global `FigureColorPlugin`.
+ * the sandbox global `FigureGuard`.
  *
  * Responsibilities:
  *   - register the single plugin-visible reader event ("renderToolbar"), which
@@ -27,7 +27,7 @@ import {
 } from "./reader-session.js";
 
 /** Extension id; must match manifest.json. */
-export const PLUGIN_ID = "figure-color-preservation@local";
+export const PLUGIN_ID = "figure-guard@zotero.org";
 
 /** The only Zotero reader event this plugin listens to. */
 export const TOOLBAR_EVENT = "renderToolbar";
@@ -46,8 +46,19 @@ export const BUTTON_LABEL = "原色";
 export const BUTTON_TITLE = "图表原色显示";
 
 /** Class and style-node id for the toolbar toggle's injected stylesheet. */
-const TOGGLE_CLASS = "fcp-toggle";
-const TOGGLE_STYLE_ID = "fcp-toggle-style";
+const TOGGLE_CLASS = "fg-toggle";
+const TOGGLE_STYLE_ID = "fg-toggle-style";
+
+/** Class of the icon image and of the text label inside the toggle button. */
+const TOGGLE_ICON_CLASS = "fg-toggle-icon";
+const TOGGLE_LABEL_CLASS = "fg-toggle-label";
+
+/**
+ * Where the packaged icon sits inside the add-on, resolved against the add-on
+ * root URI the bootstrap reported. The manifest `icons` entries name the same
+ * path, so the plugin-list icon and the toolbar button ship as one asset.
+ */
+const TOGGLE_ICON_PATH = "content/figureguard-icon.svg";
 
 /**
  * Stylesheet for the toolbar toggle, injected once per toolbar document. The
@@ -62,16 +73,18 @@ const TOGGLE_CSS = `
   -moz-appearance: none;
   display: inline-flex;
   align-items: center;
+  gap: 5px;
   margin-inline: 2px;
-  padding: 2px 8px;
+  padding: 2px 6px;
   border: 1px solid transparent;
   border-radius: 4px;
   font: inherit;
-  line-height: 1.5;
+  line-height: 1.4;
   cursor: pointer;
   color: rgba(128, 128, 128, 0.85);
   background-color: rgba(128, 128, 128, 0.12);
-  transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease,
+    box-shadow 120ms ease, opacity 120ms ease;
 }
 .${TOGGLE_CLASS}:hover {
   background-color: rgba(128, 128, 128, 0.28);
@@ -83,10 +96,44 @@ const TOGGLE_CSS = `
   outline: 2px solid rgba(1, 121, 242, 0.9);
   outline-offset: 1px;
 }
+/*
+ * The add-on icon inside the toggle. The SVG carries its own dark rounded
+ * tile, so the image is sized explicitly (a viewBox-only asset has no
+ * intrinsic size and would otherwise be laid out at the 300x150 default),
+ * rounded to match the chip, and kept out of the interaction path: pointer
+ * events and focus belong to the button, never to the image.
+ */
+.${TOGGLE_CLASS} .${TOGGLE_ICON_CLASS} {
+  display: block;
+  flex: none;
+  width: auto;
+  height: 16px;
+  border-radius: 4px;
+  opacity: 0.6;
+  filter: saturate(0.7);
+  pointer-events: none;
+  outline: none;
+  -moz-user-select: none;
+  user-select: none;
+}
 .${TOGGLE_CLASS}[aria-pressed="true"] {
   color: #ffffff;
   background-color: #0179f2;
+  border-color: #0157ad;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+/*
+ * The icon's dark tile mutes a fill-colour-only state change, so the on state
+ * is marked three ways: the chip fill and border, the label underline, and the
+ * icon coming up to full colour and opacity from the dimmed off state.
+ */
+.${TOGGLE_CLASS}[aria-pressed="true"] .${TOGGLE_ICON_CLASS} {
+  opacity: 1;
+  filter: none;
+}
+.${TOGGLE_CLASS}[aria-pressed="true"] .${TOGGLE_LABEL_CLASS} {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .${TOGGLE_CLASS}[aria-pressed="true"]:hover {
   color: #ffffff;
@@ -276,8 +323,54 @@ function ensureToggleStyles(doc) {
 }
 
 /**
+ * The add-on root URI the bootstrap handed to `startup()`, kept so the toolbar
+ * button can resolve its packaged icon. Empty until a startup supplied one, or
+ * when the bootstrap reported no root, in which case the button stays plain text
+ * instead of pointing at a URI that would render a broken image.
+ * @type {string}
+ */
+let addonRootURI = "";
+
+/**
+ * The URL of the packaged toolbar icon, resolved against the add-on root.
+ *
+ * @returns {string} The absolute resource URL, or "" when the root is unknown
+ *   and the button has to fall back to its plain text look.
+ */
+export function toolbarIconUrl() {
+  if (!addonRootURI) return "";
+  const root = addonRootURI.endsWith("/") ? addonRootURI : `${addonRootURI}/`;
+  return root + TOGGLE_ICON_PATH;
+}
+
+/**
+ * Appends a child where the document realm supports it, so a toolbar realm
+ * without a full DOM implementation degrades to the plain text button instead
+ * of losing the toggle altogether.
+ *
+ * @param {object} parent
+ * @param {object} child
+ * @returns {boolean} Whether the child was attached.
+ */
+function tryAppend(parent, child) {
+  try {
+    if (typeof parent.appendChild !== "function") return false;
+    parent.appendChild(child);
+    return true;
+  } catch (ignored) {
+    return false;
+  }
+}
+
+/**
  * Creates the toolbar toggle for one reader and wires it to the session. Any
  * button from an earlier toolbar render of the same reader is detached first.
+ *
+ * The button shows the add-on icon next to the short label: the reader toolbar
+ * is cramped, but two glyphs cost little and the icon alone (a shield over a
+ * chart) does not say "original colours". The image is decorative and the label
+ * plus `aria-label` carry the name, so a realm that cannot load the icon still
+ * announces and shows a labelled control.
  *
  * @param {object} doc The document of the toolbar realm.
  * @param {ReaderSession} session
@@ -287,13 +380,42 @@ function createButton(doc, session) {
   detachButton(session);
   ensureToggleStyles(doc);
   const button = doc.createElement("button");
-  button.textContent = BUTTON_LABEL;
   button.title = BUTTON_TITLE;
   button.type = "button";
   button.className = TOGGLE_CLASS;
   // The Zotero toolbar is a React tree: pointer events are enabled locally so
   // the toggle stays clickable even when an overlay covers the toolbar area.
   button.style.pointerEvents = "auto";
+
+  // Icon first, then the label, and only when the packaged icon can be found:
+  // with no add-on root there is nothing to point at, so the button keeps the
+  // plain text look it had before the icon shipped.
+  const iconUrl = toolbarIconUrl();
+  if (iconUrl) {
+    try {
+      const icon = doc.createElement("img");
+      icon.src = iconUrl;
+      // Decorative: the name comes from the label and the explicit aria-label.
+      icon.setAttribute("alt", "");
+      icon.setAttribute("aria-hidden", "true");
+      icon.className = TOGGLE_ICON_CLASS;
+      if (!tryAppend(button, icon)) {
+        warnOnce("button-icon", new Error("The toolbar realm rejected the icon: the button stays plain text."));
+      }
+    } catch (err) {
+      warnOnce("button-icon", err);
+    }
+  }
+  const label = doc.createElement("span");
+  label.className = TOGGLE_LABEL_CLASS;
+  label.textContent = BUTTON_LABEL;
+  if (!tryAppend(button, label)) {
+    // No appendChild in this realm: name the button through its own text.
+    button.textContent = BUTTON_LABEL;
+  }
+  // The accessible name stays the label text even where the label is clipped
+  // or hidden by the toolbar's own styles.
+  button.setAttribute("aria-label", BUTTON_LABEL);
 
   const applyState = () => {
     try {
@@ -795,6 +917,10 @@ export function startup(data = {}) {
     // before anything can bail out: `probeAll().version` is how a report proves which
     // build is installed, and that matters most on a start that went wrong.
     addonVersion = String(data?.version ?? "");
+    // The add-on root the bootstrap loaded content/index.js from, kept for the
+    // toolbar icon. Recorded with the same care as the version: a startup that
+    // later bails out still leaves the icon path resolvable.
+    addonRootURI = String(data?.rootURI ?? "");
     regionCache = new RegionCache({ maxEntries: 256 });
     const zotero = getZotero();
     const readerAPI = zotero?.Reader ?? null;
@@ -838,7 +964,7 @@ export function startup(data = {}) {
         const win = (typeof zotero?.getMainWindow === "function" ? zotero.getMainWindow() : null)
           ?? wm?.getMostRecentWindow?.("navigator:browser")
           ?? null;
-        if (win) win.FigureColorPlugin = globalThis.FigureColorPlugin ?? null;
+        if (win) win.FigureGuard = globalThis.FigureGuard ?? null;
         installViewerBridge(win);
       } catch (err) {
         warnOnce("publish-window", err);
@@ -866,6 +992,7 @@ export function shutdown() {
   try {
     started = false;
     addonVersion = "";
+    addonRootURI = "";
     while (observers.length) removeWindowObserver(observers.pop());
     removeZoteroNotifier();
 
