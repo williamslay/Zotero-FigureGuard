@@ -1,0 +1,14 @@
+{
+  "manifest_version": 2,
+  "name": "Figure Color Preservation",
+  "version": "0.1.31",
+  "description": "Keeps detected figure regions in their original PDF colours inside the dark Zotero reader.",
+  "applications": {
+    "zotero": {
+      "id": "figure-color-preservation@local",
+      "update_url": "https://www.zotero.org/update/figure-color-preservation",
+      "strict_min_version": "6.999",
+      "strict_max_version": "10.9.9"
+    }
+  }
+}

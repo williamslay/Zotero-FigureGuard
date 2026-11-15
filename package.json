@@ -1,0 +1,32 @@
+{
+  "name": "zotero-figure-color-preservation",
+  "version": "0.1.31",
+  "private": true,
+  "description": "Zotero FigureGuard — keeps figures in their original colours inside the dark-theme PDF reader",
+  "type": "module",
+  "license": "MIT",
+  "author": "williamslay <williamslay.lsy@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/williamslay/Zotero-FigureGuard.git"
+  },
+  "keywords": [
+    "zotero",
+    "zotero-plugin",
+    "pdf",
+    "dark-theme",
+    "figure-detection"
+  ],
+  "scripts": {
+    "test": "node --test tests/js/*.test.mjs",
+    "detect": "node --test tests/js/fixture-detect.test.mjs",
+    "probe": "node scripts/probe_pdfjs_ops.mjs",
+    "render": "node scripts/render_check.mjs",
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^1.1.0",
+    "esbuild": "^0.28.2",
+    "pdfjs-dist": "^6.5.438"
+  }
+}
