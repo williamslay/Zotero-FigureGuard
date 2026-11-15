@@ -49,17 +49,6 @@ export const BUTTON_TITLE = "图表原色显示";
 const TOGGLE_CLASS = "fg-toggle";
 const TOGGLE_STYLE_ID = "fg-toggle-style";
 
-/** Class of the icon image and of the text label inside the toggle button. */
-const TOGGLE_ICON_CLASS = "fg-toggle-icon";
-const TOGGLE_LABEL_CLASS = "fg-toggle-label";
-
-/**
- * Where the packaged icon sits inside the add-on, resolved against the add-on
- * root URI the bootstrap reported. The manifest `icons` entries name the same
- * path, so the plugin-list icon and the toolbar button ship as one asset.
- */
-const TOGGLE_ICON_PATH = "content/figureguard-icon.svg";
-
 /**
  * Stylesheet for the toolbar toggle, injected once per toolbar document. The
  * on/off look keys off [aria-pressed], so the existing aria-pressed update is
@@ -73,18 +62,17 @@ const TOGGLE_CSS = `
   -moz-appearance: none;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
   margin-inline: 2px;
-  padding: 2px 6px;
+  padding: 2px 8px;
   border: 1px solid transparent;
   border-radius: 4px;
   font: inherit;
-  line-height: 1.4;
+  line-height: 1.5;
   cursor: pointer;
   color: rgba(128, 128, 128, 0.85);
   background-color: rgba(128, 128, 128, 0.12);
   transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease,
-    box-shadow 120ms ease, opacity 120ms ease;
+    box-shadow 120ms ease;
 }
 .${TOGGLE_CLASS}:hover {
   background-color: rgba(128, 128, 128, 0.28);
@@ -97,43 +85,15 @@ const TOGGLE_CSS = `
   outline-offset: 1px;
 }
 /*
- * The add-on icon inside the toggle. The SVG carries its own dark rounded
- * tile, so the image is sized explicitly (a viewBox-only asset has no
- * intrinsic size and would otherwise be laid out at the 300x150 default),
- * rounded to match the chip, and kept out of the interaction path: pointer
- * events and focus belong to the button, never to the image.
+ * The on state is the solid accent chip: grey text on a translucent grey wash
+ * versus white on a filled blue chip reads clearly on light and dark toolbars
+ * alike, with no decoration on the label itself.
  */
-.${TOGGLE_CLASS} .${TOGGLE_ICON_CLASS} {
-  display: block;
-  flex: none;
-  width: auto;
-  height: 16px;
-  border-radius: 4px;
-  opacity: 0.6;
-  filter: saturate(0.7);
-  pointer-events: none;
-  outline: none;
-  -moz-user-select: none;
-  user-select: none;
-}
 .${TOGGLE_CLASS}[aria-pressed="true"] {
   color: #ffffff;
   background-color: #0179f2;
   border-color: #0157ad;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-}
-/*
- * The icon's dark tile mutes a fill-colour-only state change, so the on state
- * is marked three ways: the chip fill and border, the label underline, and the
- * icon coming up to full colour and opacity from the dimmed off state.
- */
-.${TOGGLE_CLASS}[aria-pressed="true"] .${TOGGLE_ICON_CLASS} {
-  opacity: 1;
-  filter: none;
-}
-.${TOGGLE_CLASS}[aria-pressed="true"] .${TOGGLE_LABEL_CLASS} {
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
 .${TOGGLE_CLASS}[aria-pressed="true"]:hover {
   color: #ffffff;
@@ -149,7 +109,7 @@ const TOGGLE_CSS = `
 let regionCache = null;
 /** @type {Map<object, {session: ReaderSession, startPromise: Promise<any>|null, closeWatch: object|null}>} */
 const sessions = new Map();
-/** @type {Map<ReaderSession, {button: object, onClick: (event: object) => void, off: () => void}>} The toolbar button currently mounted per session. */
+/** @type {Map<ReaderSession, {button: object, onPointerDown: (event: object) => void, onClick: (event: object) => void, off: () => void}>} The toolbar button currently mounted per session. */
 const buttonLinks = new Map();
 /** @type {Array<object|null>} Registered window observers. */
 const observers = [];
@@ -279,8 +239,10 @@ function tagFor(reader) {
 }
 
 /**
- * Drops the click and state listeners of the session's current button, so
- * repeated toolbar renders do not pile up detached buttons and listeners.
+ * Removes the session's current button from the toolbar: both activation
+ * listeners are unbound, the node is taken out of its parent, and the state
+ * listener is dropped, so repeated toolbar renders do not pile up detached
+ * buttons and listeners.
  *
  * @param {ReaderSession} session
  * @returns {boolean} Whether a button was detached.
@@ -293,6 +255,18 @@ function detachButton(session) {
     link.button.removeEventListener("click", link.onClick);
   } catch (ignored) {
     // The toolbar node may already be gone.
+  }
+  try {
+    link.button.removeEventListener("pointerdown", link.onPointerDown);
+  } catch (ignored) {
+    // Same node, already gone either way.
+  }
+  try {
+    const parent = link.button.parentNode;
+    if (parent?.removeChild) parent.removeChild(link.button);
+  } catch (ignored) {
+    // Already unmounted, or the realm hides the parent; the next render appends
+    // its own button either way.
   }
   try {
     link.off();
@@ -323,54 +297,12 @@ function ensureToggleStyles(doc) {
 }
 
 /**
- * The add-on root URI the bootstrap handed to `startup()`, kept so the toolbar
- * button can resolve its packaged icon. Empty until a startup supplied one, or
- * when the bootstrap reported no root, in which case the button stays plain text
- * instead of pointing at a URI that would render a broken image.
- * @type {string}
- */
-let addonRootURI = "";
-
-/**
- * The URL of the packaged toolbar icon, resolved against the add-on root.
- *
- * @returns {string} The absolute resource URL, or "" when the root is unknown
- *   and the button has to fall back to its plain text look.
- */
-export function toolbarIconUrl() {
-  if (!addonRootURI) return "";
-  const root = addonRootURI.endsWith("/") ? addonRootURI : `${addonRootURI}/`;
-  return root + TOGGLE_ICON_PATH;
-}
-
-/**
- * Appends a child where the document realm supports it, so a toolbar realm
- * without a full DOM implementation degrades to the plain text button instead
- * of losing the toggle altogether.
- *
- * @param {object} parent
- * @param {object} child
- * @returns {boolean} Whether the child was attached.
- */
-function tryAppend(parent, child) {
-  try {
-    if (typeof parent.appendChild !== "function") return false;
-    parent.appendChild(child);
-    return true;
-  } catch (ignored) {
-    return false;
-  }
-}
-
-/**
  * Creates the toolbar toggle for one reader and wires it to the session. Any
  * button from an earlier toolbar render of the same reader is detached first.
  *
- * The button shows the add-on icon next to the short label: the reader toolbar
- * is cramped, but two glyphs cost little and the icon alone (a shield over a
- * chart) does not say "original colours". The image is decorative and the label
- * plus `aria-label` carry the name, so a realm that cannot load the icon still
- * announces and shows a labelled control.
+ * The button is a plain text control: the short label names it, in the toolbar
+ * and for assistive technology alike. The add-on icon belongs to the plug-in
+ * list (the manifest `icons` entries), not to this button.
  *
  * @param {object} doc The document of the toolbar realm.
  * @param {ReaderSession} session
@@ -380,42 +312,13 @@ function createButton(doc, session) {
   detachButton(session);
   ensureToggleStyles(doc);
   const button = doc.createElement("button");
+  button.textContent = BUTTON_LABEL;
   button.title = BUTTON_TITLE;
   button.type = "button";
   button.className = TOGGLE_CLASS;
   // The Zotero toolbar is a React tree: pointer events are enabled locally so
   // the toggle stays clickable even when an overlay covers the toolbar area.
   button.style.pointerEvents = "auto";
-
-  // Icon first, then the label, and only when the packaged icon can be found:
-  // with no add-on root there is nothing to point at, so the button keeps the
-  // plain text look it had before the icon shipped.
-  const iconUrl = toolbarIconUrl();
-  if (iconUrl) {
-    try {
-      const icon = doc.createElement("img");
-      icon.src = iconUrl;
-      // Decorative: the name comes from the label and the explicit aria-label.
-      icon.setAttribute("alt", "");
-      icon.setAttribute("aria-hidden", "true");
-      icon.className = TOGGLE_ICON_CLASS;
-      if (!tryAppend(button, icon)) {
-        warnOnce("button-icon", new Error("The toolbar realm rejected the icon: the button stays plain text."));
-      }
-    } catch (err) {
-      warnOnce("button-icon", err);
-    }
-  }
-  const label = doc.createElement("span");
-  label.className = TOGGLE_LABEL_CLASS;
-  label.textContent = BUTTON_LABEL;
-  if (!tryAppend(button, label)) {
-    // No appendChild in this realm: name the button through its own text.
-    button.textContent = BUTTON_LABEL;
-  }
-  // The accessible name stays the label text even where the label is clipped
-  // or hidden by the toolbar's own styles.
-  button.setAttribute("aria-label", BUTTON_LABEL);
 
   const applyState = () => {
     try {
@@ -426,19 +329,34 @@ function createButton(doc, session) {
       // A button that cannot restyle itself is still functional.
     }
   };
+  // Activation is split to kill the double-click race: the primary pointer
+  // button toggles on pointerdown, immediately, with no preventDefault, so the
+  // browser keeps its normal focus behaviour. The click event that follows a
+  // mouse press carries detail >= 1 and is ignored, because pointerdown already
+  // acted; only keyboard activation (detail === 0) toggles through click. No
+  // timer reconciles the two — each event decides on its own.
+  const onPointerDown = (event) => {
+    try {
+      if (event?.button !== 0) return;
+      session.toggle();
+    } catch (err) {
+      warnOnce("button-press", err);
+    }
+  };
   const onClick = (event) => {
     try {
-      event?.preventDefault?.();
+      if (event?.detail !== 0) return;
       session.toggle();
     } catch (err) {
       warnOnce("button-click", err);
     }
   };
 
+  button.addEventListener("pointerdown", onPointerDown);
   button.addEventListener("click", onClick);
   const off = session.addListener(applyState);
   applyState();
-  buttonLinks.set(session, { button, session, onClick, off });
+  buttonLinks.set(session, { button, session, onPointerDown, onClick, off });
   return button;
 }
 
@@ -917,10 +835,6 @@ export function startup(data = {}) {
     // before anything can bail out: `probeAll().version` is how a report proves which
     // build is installed, and that matters most on a start that went wrong.
     addonVersion = String(data?.version ?? "");
-    // The add-on root the bootstrap loaded content/index.js from, kept for the
-    // toolbar icon. Recorded with the same care as the version: a startup that
-    // later bails out still leaves the icon path resolvable.
-    addonRootURI = String(data?.rootURI ?? "");
     regionCache = new RegionCache({ maxEntries: 256 });
     const zotero = getZotero();
     const readerAPI = zotero?.Reader ?? null;
@@ -992,7 +906,6 @@ export function shutdown() {
   try {
     started = false;
     addonVersion = "";
-    addonRootURI = "";
     while (observers.length) removeWindowObserver(observers.pop());
     removeZoteroNotifier();
 

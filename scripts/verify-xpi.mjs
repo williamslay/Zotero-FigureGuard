@@ -238,7 +238,7 @@ async function main() {
   }
 
   // 4 and 5. Root placement of the loader files, exact path of the bundle and
-  // of the icon the manifest icons entries and the toolbar button resolve.
+  // of the icon the manifest icons entries point at for the plug-in list.
   for (const rootEntry of ["manifest.json", "bootstrap.js"]) {
     if (!names.includes(rootEntry)) {
       const prefixed = names.filter((name) => name !== rootEntry && name.endsWith(`/${rootEntry}`));
@@ -258,8 +258,8 @@ async function main() {
   if (!names.includes("content/figureguard-icon.svg")) {
     throw new Error(
       `content/figureguard-icon.svg is not at that exact path in ${fileName} ` +
-        `(entries: ${names.join(", ")}). The manifest icons entries and the reader ` +
-        "toolbar button resolve rootURI + content/figureguard-icon.svg.",
+        `(entries: ${names.join(", ")}). The manifest icons entries resolve ` +
+        "rootURI + content/figureguard-icon.svg for the plug-in list.",
     );
   }
 

@@ -152,8 +152,9 @@ unzip -l zotero-figure-guard-0.6.0.xpi
 The archive must contain only `manifest.json`, `bootstrap.js`,
 `content/index.js`, and `content/figureguard-icon.svg`. Install it through
 Zotero → Tools → Add-ons → gear icon → **Install Plugin From File…**, then
-confirm the add-on manager lists `Zotero Figure Guard` at version `0.6.0`, with
-the shield icon beside the name.
+confirm the plug-in list shows `Zotero Figure Guard` at version `0.6.0` with
+its icon beside the name, and that the reader toolbar control is the text
+button `原色`.
 
 ## When a release fails
 

@@ -39,7 +39,7 @@ Zotero 原生 PDF 阅读器的深色主题会把整页反色：文字变白是�
 - **跟随阅读操作**：缩放、翻页、窗口尺寸变化后自动重画；多页签切换自动跟随。
 - **按文档缓存**：区域集合以「条目 + 文档指纹」为键缓存，重复打开不重新检测。
 - **工具栏开关**：一键启停。
-- **插件图标**：同一份 `figureguard-icon.svg` 既是插件列表里的图标，也画在阅读器工具栏按钮上（图标加「原色」短标签，开启时按钮填充高亮、标签带下划线）。
+- **插件图标**：`figureguard-icon.svg` 显示在 Zotero 插件列表里；阅读器工具栏上的开关仍是「原色」文字按钮。
 
 ## 安装
 
@@ -77,7 +77,7 @@ node scripts/verify-xpi.mjs
 npm run test:ci
 ```
 
-只跑不碰真实 PDF 的测试文件（当前 17 个文件、390 个用例），全部实际执行并通过，结果里 `cancelled` 必须为 0。GitHub Actions 的 CI 就是这一级。
+只跑不碰真实 PDF 的测试文件（当前 17 个文件、392 个用例），全部实际执行并通过，结果里 `cancelled` 必须为 0。GitHub Actions 的 CI 就是这一级。
 
 **Level 2 — 完整 fixture 回归**（需要真实 PDF）
 
@@ -95,7 +95,7 @@ HiKV - A Hybrid Index Key-Value Store for DRAM-NVM Memory Systems.pdf
 fixture/PipeBWrite.pdf
 ```
 
-完整回归共 24 个文件、472 个用例。缺少这些 PDF 时，`npm test` 会得到 393 通过、79 取消（cancelled）、0 失败：被取消的 79 个用例来自 7 个依赖真实 PDF 的测试文件，它们的 `before` 钩子打不开文件。`npm run test:ci` 会跳过这 7 个文件，所以公开 CI 里不会出现「大量 cancelled 冒充通过」。完整回归只在维护者本地跑，不作为公开 CI 的强制门槛。
+完整回归共 24 个文件、474 个用例。缺少这些 PDF 时，`npm test` 会得到 395 通过、79 取消（cancelled）、0 失败：被取消的 79 个用例来自 7 个依赖真实 PDF 的测试文件，它们的 `before` 钩子打不开文件。`npm run test:ci` 会跳过这 7 个文件，所以公开 CI 里不会出现「大量 cancelled 冒充通过」。完整回归只在维护者本地跑，不作为公开 CI 的强制门槛。
 
 ## 工作原理
 
@@ -119,7 +119,7 @@ scripts/verify-xpi.mjs    校验 dist/*.xpi 的包结构与版本，并写出 SH
 scripts/survey_pdf.mjs    对任意 PDF 跑一遍检测器并输出区域清单
 tests/js/                 node:test 用例
 fixture/                  参考数据 fixture-verified.json（PDF/PNG 不入库）
-assets/figureguard-icon.svg  插件图标，插件列表与工具栏按钮共用；该目录其余文件是 README 用图
+assets/figureguard-icon.svg  插件图标，显示在 Zotero 插件列表；该目录其余文件是 README 用图
 docs/RELEASING.md         维护者发布说明
 .github/workflows/        ci.yml（测试与构建）、release.yml（Tag 触发发布）
 ```

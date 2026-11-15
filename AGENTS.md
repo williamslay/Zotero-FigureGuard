@@ -29,7 +29,7 @@ Zotero Figure Guard 是 Zotero 7–10 的 PDF 阅读器扩展。深色主题下�
 
 ## 两级测试
 
-- `npm run test:ci` — 公开 CI 级，不需要受版权保护的 PDF。只跑不碰真实 PDF 的测试文件（当前 17 个文件、390 个用例），全部实际执行并通过，结果里 `cancelled` 必须为 0。GitHub Actions 的 CI 就是这一级。
+- `npm run test:ci` — 公开 CI 级，不需要受版权保护的 PDF。只跑不碰真实 PDF 的测试文件（当前 17 个文件、392 个用例），全部实际执行并通过，结果里 `cancelled` 必须为 0。GitHub Actions 的 CI 就是这一级。
 - `npm test`（等价于 `npm run test:fixture`）— 维护者本地的完整回归级。检测层的回归基线取自 5 篇论文的 PDF，这些 PDF 受版权保护、不随仓库分发，需要自行放到 README「运行测试」一节列出的路径。缺少这些 PDF 时，被依赖真实 PDF 的用例会取消（cancelled）而不是通过，所以完整回归只在维护者本地跑，不作为公开 CI 的强制门槛。
 
 发布步骤与失败处理见 [docs/RELEASING.md](./docs/RELEASING.md)。
