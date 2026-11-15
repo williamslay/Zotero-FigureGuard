@@ -21,10 +21,11 @@ const buildDir = path.join(repoRoot, "build");
 const distDir = path.join(repoRoot, "dist");
 
 /**
- * Reads the version of both sources. The manifest is what Zotero installs, so a
- * mismatch means the file name would not describe the installed add-on.
+ * Reads the version of every source that carries it. The manifest is what Zotero
+ * installs and the file name is what the release publishes, so a mismatch in any
+ * of them means the artefact would not describe the installed add-on.
  *
- * @returns {Promise<string>} The version, identical in manifest.json and package.json.
+ * @returns {Promise<string>} The version, identical everywhere.
  */
 async function readVersion() {
   const { readFile } = await import("node:fs/promises");
@@ -32,9 +33,28 @@ async function readVersion() {
   if (!pkg?.version) throw new Error("package.json has no version");
   const manifest = JSON.parse(await readFile(path.join(repoRoot, "manifest.json"), "utf8"));
   if (!manifest?.version) throw new Error("manifest.json has no version");
-  if (manifest.version !== pkg.version) {
+  const lock = JSON.parse(await readFile(path.join(repoRoot, "package-lock.json"), "utf8"));
+  if (!lock?.version) throw new Error("package-lock.json has no version");
+  // lockfileVersion 2 and 3 both store the workspace root under packages[""].
+  if (!(Number(lock?.lockfileVersion) >= 2)) {
     throw new Error(
-      `Version mismatch: manifest.json is ${manifest.version}, package.json is ${pkg.version}. Keep them in sync.`,
+      `package-lock.json has lockfileVersion ${lock?.lockfileVersion}; version 2 or higher is required to check packages[""].`,
+    );
+  }
+  const rootPackage = lock.packages?.[""];
+  if (!rootPackage?.version) {
+    throw new Error('package-lock.json has no version in packages[""]');
+  }
+
+  const fields = [
+    ["package.json", pkg.version],
+    ["manifest.json", manifest.version],
+    ["package-lock.json root", lock.version],
+    ['package-lock.json packages[""]', rootPackage.version],
+  ];
+  if (fields.some(([, value]) => value !== manifest.version)) {
+    throw new Error(
+      `Version mismatch: ${fields.map(([where, value]) => `${where} is ${value}`).join(", ")}. Keep them in sync.`,
     );
   }
   return manifest.version;

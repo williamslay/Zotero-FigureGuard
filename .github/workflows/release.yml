@@ -1,0 +1,97 @@
+name: Release
+
+# Publishing is tag driven. One tag means one version, and nothing here bumps a
+# version or commits code. workflow_dispatch is only a retry door for a tag that
+# already exists.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to publish, for example v0.1.32'
+        required: true
+        type: string
+
+# Only the release job gets write access, and only on a controlled version tag.
+# The built-in GITHUB_TOKEN is enough: no Personal Access Token is required.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Test, build and publish
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Check the tag name
+        run: |
+          echo "Publishing tag: $TAG"
+          if ! printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$TAG' is not a version tag of the form vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+
+      - name: Check out the tagged commit
+        # fetch-depth 0 so the job can test whether the tag sits in main's history.
+        # The repository is small, so a full clone is cheap.
+        uses: actions/checkout@v7 # v7 (node24 runtime)
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Check that the tag belongs to main
+        run: |
+          set -eu
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          sha="$(git rev-list -n 1 "$TAG")"
+          echo "Tag $TAG resolves to $sha"
+          if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
+            echo "::error::Tag $TAG is not part of main's history. Release from main, not from dev."
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7 # v7 (node24 runtime)
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies from the lockfile
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm run test:ci
+
+      - name: Build the XPI
+        run: npm run build
+
+      # Fails when the tag, package.json, package-lock.json, manifest.json or the
+      # archive file name disagree about the version, and writes dist/SHA256SUMS.txt.
+      - name: Verify version and XPI package
+        run: node scripts/verify-xpi.mjs --expect-version "${TAG#v}"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          version="${TAG#v}"
+          xpi="dist/figure-color-preservation-${version}.xpi"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists. Refusing to overwrite its assets. Delete it with 'gh release delete $TAG --yes' or publish a new version."
+            exit 1
+          fi
+          args=("$TAG" "$xpi" dist/SHA256SUMS.txt --verify-tag --generate-notes)
+          case "$version" in
+            0.*) args+=(--prerelease) ;;
+          esac
+          gh release create "${args[@]}"
+          gh release view "$TAG" --json tagName,prerelease,assets \
+            --jq '"Published \(.tagName) (prerelease: \(.prerelease)) with assets: \([.assets[].name] | join(", "))"'

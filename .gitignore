@@ -7,8 +7,10 @@ dist/
 reports/
 
 # Internal working documents
-# (tracked on the dev branch, ignored on the public main branch)
-docs/
+# (tracked on the dev branch, ignored on the public main branch).
+# RELEASING.md is the one document published on main.
+docs/*
+!docs/RELEASING.md
 
 # Copyrighted test papers and their reference renders: not redistributed
 fixture/*.pdf
