@@ -77,9 +77,6 @@ const TOGGLE_CSS = `
 .${TOGGLE_CLASS}:hover {
   background-color: rgba(128, 128, 128, 0.28);
 }
-.${TOGGLE_CLASS}:active {
-  transform: translateY(1px);
-}
 .${TOGGLE_CLASS}:focus-visible {
   outline: 2px solid rgba(1, 121, 242, 0.9);
   outline-offset: 1px;
@@ -109,7 +106,7 @@ const TOGGLE_CSS = `
 let regionCache = null;
 /** @type {Map<object, {session: ReaderSession, startPromise: Promise<any>|null, closeWatch: object|null}>} */
 const sessions = new Map();
-/** @type {Map<ReaderSession, {button: object, onPointerDown: (event: object) => void, onClick: (event: object) => void, off: () => void}>} The toolbar button currently mounted per session. */
+/** @type {Map<ReaderSession, {button: object, session: ReaderSession, doc: object, onPointerDown: (event: object) => void, onClick: (event: object) => void, off: () => void}>} The toolbar button currently mounted per session, with the document its activation listeners are bound to. */
 const buttonLinks = new Map();
 /** @type {Array<object|null>} Registered window observers. */
 const observers = [];
@@ -239,10 +236,33 @@ function tagFor(reader) {
 }
 
 /**
- * Removes the session's current button from the toolbar: both activation
- * listeners are unbound, the node is taken out of its parent, and the state
- * listener is dropped, so repeated toolbar renders do not pile up detached
- * buttons and listeners.
+ * Hit test for the delegated toolbar listeners: whether the press coordinates
+ * fall inside `node`'s box. A rect of zero width or height never hits, because
+ * every reader tab in the window owns a `.fg-toggle` and the toggles of the
+ * hidden tabs report a zero-size rect.
+ *
+ * @param {object} node The element to test the press against.
+ * @param {object} event The pointer or click event, for its client coordinates.
+ * @returns {boolean} Whether the press landed inside a real, visible box.
+ */
+function pressInsideBox(node, event) {
+  if (!node || !event) return false;
+  const rect = node?.getBoundingClientRect?.();
+  if (!rect) return false;
+  if (!(rect.width > 0) || !(rect.height > 0)) return false;
+  return (
+    event.clientX >= rect.left &&
+    event.clientX <= rect.right &&
+    event.clientY >= rect.top &&
+    event.clientY <= rect.bottom
+  );
+}
+
+/**
+ * Removes the session's current button from the toolbar: both delegated
+ * activation listeners are unbound from the toolbar document, the node is taken
+ * out of its parent, and the state listener is dropped, so repeated toolbar
+ * renders do not pile up detached buttons and listeners.
  *
  * @param {ReaderSession} session
  * @returns {boolean} Whether a button was detached.
@@ -252,14 +272,14 @@ function detachButton(session) {
   if (!link) return false;
   buttonLinks.delete(session);
   try {
-    link.button.removeEventListener("click", link.onClick);
+    link.doc.removeEventListener("pointerdown", link.onPointerDown, true);
   } catch (ignored) {
-    // The toolbar node may already be gone.
+    // The toolbar document may already be gone.
   }
   try {
-    link.button.removeEventListener("pointerdown", link.onPointerDown);
+    link.doc.removeEventListener("click", link.onClick, true);
   } catch (ignored) {
-    // Same node, already gone either way.
+    // Same document, already gone either way.
   }
   try {
     const parent = link.button.parentNode;
@@ -329,34 +349,86 @@ function createButton(doc, session) {
       // A button that cannot restyle itself is still functional.
     }
   };
-  // Activation is split to kill the double-click race: the primary pointer
-  // button toggles on pointerdown, immediately, with no preventDefault, so the
-  // browser keeps its normal focus behaviour. The click event that follows a
-  // mouse press carries detail >= 1 and is ignored, because pointerdown already
-  // acted; only keyboard activation (detail === 0) toggles through click. No
-  // timer reconciles the two — each event decides on its own.
+  // Activation is delegated to the toolbar document instead of the node, in the
+  // capture phase, because the Zotero toolbar is a React tree: a press that
+  // first focuses the window can re-render the toolbar and replace the node we
+  // appended, and then the event is delivered to nodes we never hold. Each
+  // document listener hit-tests the press coordinates against the node we hold
+  // and against any re-rendered stand-in carrying our class, so one press
+  // reaches the session however the toolbar rebuilt itself underneath it.
+  // Pointer presses act on pointerdown, immediately and with no
+  // preventDefault, so the browser keeps its normal focus behaviour; the click
+  // listener exists only for the keyboard, whose click carries detail === 0,
+  // while every mouse click carries detail >= 1 and is ignored because
+  // pointerdown already acted. No timer reconciles the two — each event decides
+  // on its own.
+  //
+  // TEMPORARY real-machine diagnostic, kept while the toolbar double-click
+  // report is open: a first press that leaves `d` at 0 never reached this
+  // document, and a first press that raises `d` but not `p` landed outside the
+  // toggle's box. Delete this block once the fix is verified on a real machine.
+  const seen = { press: 0, click: 0, doc: 0, toggle: 0 };
+  const paintSeen = () => {
+    try {
+      button.title = `${BUTTON_TITLE} p${seen.press} c${seen.click} d${seen.doc} t${seen.toggle}`;
+    } catch (ignored) {
+      // A tooltip that cannot be rewritten still leaves the counters correct.
+    }
+  };
+  paintSeen();
+
+  /**
+   * Both accepted shapes of a press on this toggle: the node we appended, or a
+   * stand-in the toolbar re-rendered after throwing our node away. The stand-in
+   * counts only while our own node is out of the document: every reader tab in
+   * the window owns a `.fg-toggle` and shares this document, so a still-attached
+   * node of ours means a press on a class-carrying box belongs to that other
+   * tab's toggle, not to this session.
+   *
+   * @param {object} event
+   * @returns {boolean}
+   */
+  const hitToggle = (event) => {
+    if (pressInsideBox(button, event)) return true;
+    if (button.isConnected) return false;
+    const standIn = event?.target?.closest?.(`.${TOGGLE_CLASS}`) ?? null;
+    if (!standIn || standIn === button) return false;
+    return pressInsideBox(standIn, event);
+  };
+
   const onPointerDown = (event) => {
     try {
+      seen.doc += 1;
       if (event?.button !== 0) return;
+      if (!hitToggle(event)) return;
+      seen.press += 1;
+      seen.toggle += 1;
       session.toggle();
     } catch (err) {
       warnOnce("button-press", err);
+    } finally {
+      paintSeen();
     }
   };
   const onClick = (event) => {
     try {
       if (event?.detail !== 0) return;
+      if (!hitToggle(event)) return;
+      seen.click += 1;
+      seen.toggle += 1;
       session.toggle();
     } catch (err) {
       warnOnce("button-click", err);
+    } finally {
+      paintSeen();
     }
   };
 
-  button.addEventListener("pointerdown", onPointerDown);
-  button.addEventListener("click", onClick);
+  doc.addEventListener("pointerdown", onPointerDown, true);
+  doc.addEventListener("click", onClick, true);
   const off = session.addListener(applyState);
   applyState();
-  buttonLinks.set(session, { button, session, onPointerDown, onClick, off });
+  buttonLinks.set(session, { button, session, doc, onPointerDown, onClick, off });
   return button;
 }
 

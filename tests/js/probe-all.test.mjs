@@ -142,6 +142,8 @@ function fakeOverlay(pageNumber) {
 /** A minimal toolbar-document stand-in. */
 function fakeDoc() {
   return {
+    addEventListener() {},
+    removeEventListener() {},
     createElement: () => ({
       style: {},
       setAttribute() {},
