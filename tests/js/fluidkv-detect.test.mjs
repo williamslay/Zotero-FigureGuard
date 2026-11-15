@@ -310,6 +310,7 @@ describe("fluidkv fixture: whole document survey", () => {
       "reports",
       "fluidkv-detection.json",
     );
+    await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(file, `${JSON.stringify(survey, null, 2)}\n`);
     assert.equal(survey.length, 14);
   });

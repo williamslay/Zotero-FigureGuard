@@ -63,6 +63,7 @@ for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
 }
 await close();
 
+fs.mkdirSync(path.dirname(output), { recursive: true });
 fs.writeFileSync(output, `${JSON.stringify(survey, null, 2)}\n`);
 for (const entry of survey) {
   console.log(

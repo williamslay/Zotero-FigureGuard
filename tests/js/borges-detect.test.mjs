@@ -218,6 +218,7 @@ describe("borges fixture: whole document survey", () => {
       "reports",
       "borges-detection.json",
     );
+    await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(file, `${JSON.stringify(survey, null, 2)}\n`);
     assert.equal(survey.length, 18);
   });

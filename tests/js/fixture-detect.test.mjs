@@ -321,6 +321,7 @@ describe("A1 fixture: whole document survey", () => {
     const fs = await import("node:fs/promises");
     const path = await import("node:path");
     const file = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "..", "reports", "A1-detection.json");
+    await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(file, `${JSON.stringify(survey, null, 2)}\n`);
     assert.ok(survey.length >= 16);
   });
