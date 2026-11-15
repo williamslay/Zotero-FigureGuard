@@ -119,5 +119,5 @@ jobs:
             args+=(--prerelease)
           fi
           gh release create "${args[@]}"
-          gh release view "$TAG" --json tagName,prerelease,assets \
-            --jq '"Published \(.tagName) (prerelease: \(.prerelease)) with assets: \([.assets[].name] | join(", "))"'
+          gh release view "$TAG" --json tagName,isPrerelease,assets \
+            --jq '"Published \(.tagName) (prerelease: \(.isPrerelease)) with assets: \([.assets[].name] | join(", "))"'

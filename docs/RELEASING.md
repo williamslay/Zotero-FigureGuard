@@ -116,8 +116,9 @@ fast instead of releasing code nobody merged.
 A version tag pushed to the repository is published as a **formal** release. To
 publish a pre-release, start the workflow by hand — **Actions** → **Release** →
 **Run workflow** — and tick **Mark the published release as a pre-release**. To
-change the mark afterwards: `gh release edit v0.6.0 --prerelease` or
-`gh release edit v0.6.0 --release`.
+change the mark afterwards: `gh release edit v0.6.0 --prerelease` to set it,
+`gh release edit v0.6.0 --prerelease=false` to clear it. The JSON field printed by
+the workflow is `isPrerelease`, not `prerelease`.
 
 ## Watch the workflow
 
@@ -162,6 +163,7 @@ The archive must contain only `manifest.json`, `bootstrap.js`, and
 | Test step is red | Fix the tests on `main`, then tag a new version. Do not push a second tag for the same version. |
 | Release with the same name already exists | `gh release view v0.6.0` shows it. Delete it with `gh release delete v0.6.0 --yes` (this keeps the tag), or use a new version number. The workflow never overwrites an existing release's assets. |
 | `GITHUB_TOKEN` lacks write access | See the settings below. |
+| `Publish the release` is red while the release page already shows both assets | `gh release create` succeeded and a later command in the same step failed. Check `gh release view <tag>`, fix the step, and retry with a dispatch run after deleting the release. |
 | Tag pointed at the wrong commit | Delete the tag locally and remotely (`git push origin :refs/tags/v0.6.0`), then re-tag the right commit — only while no release has been published from it. |
 
 To retry publishing without pushing a new tag, use **Actions** → **Release** →
