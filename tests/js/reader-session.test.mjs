@@ -358,24 +358,61 @@ describe("resolveInnerWindow: only latches a viewer realm", () => {
   });
 });
 
+/** A page view that has a rendered page, a div and a viewport, i.e. paintable. */
+function renderedPageView(id) {
+  return {
+    id,
+    pdfPage: {},
+    div: { style: {}, appendChild() {} },
+    viewport: {
+      scale: 1,
+      width: 612,
+      height: 792,
+      rotation: 0,
+      transform: [1, 0, 0, -1, 0, 792],
+      convertToViewportPoint: (x, y) => [x, 792 - y],
+    },
+  };
+}
+
+/**
+ * A viewer realm that lists one rendered page view per entry of `pageNumbers`, so
+ * the settled pass has something to re-attach to: the heal runs through
+ * `attachPageNumber()`, and a page that is not in the viewer's list heals nothing.
+ *
+ * @param {number[]} pageNumbers
+ * @returns {object} The realm, for `session.innerWin`.
+ */
+function viewerWithPages(pageNumbers) {
+  const realm = fakeRealm({ pdfDocument: { numPages: pageNumbers.length } });
+  realm.PDFViewerApplication.pdfViewer._pagesView = pageNumbers.map((id) => renderedPageView(id));
+  return realm;
+}
+
 /**
  * An overlay stand-in for the settled re-check. Only the fields the check reads
  * exist: the paint itself is stubbed on the session, so the check's routing —
  * which pages it re-paints — is what these tests pin down.
  *
  * @param {number} pageNumber
- * @param {{stale?: boolean, destroyed?: boolean, regions?: Array<*>}} [state]
+ * @param {{stale?: boolean, mounted?: boolean, destroyed?: boolean, regions?: Array<*>}} [state]
+ *   `stale` is the painted viewport having moved; `mounted` is the canvases still
+ *   hanging in the live page.
  */
-function settledOverlay(pageNumber, { stale = false, destroyed = false, regions = [[10, 20, 300, 400]] } = {}) {
+function settledOverlay(pageNumber, { stale = false, mounted = true, destroyed = false, regions = [[10, 20, 300, 400]] } = {}) {
   return {
     pageNumber,
     regionBoxes: regions,
     destroyed,
     cleared: 0,
+    pageView: null,
     geometryStaleCalls: 0,
     geometryStale() {
       this.geometryStaleCalls += 1;
       return stale;
+    },
+    isMounted() {
+      return mounted;
     },
     clear() {
       this.cleared += 1;
@@ -488,6 +525,10 @@ describe("reader session: settled geometry re-check after a toolbar toggle", () 
       session.overlays.set(1, settledOverlay(1, { stale: true }));
       session.overlays.set(2, settledOverlay(2));
       session.setEnabled(true);
+      // The page views the healed record is re-bound to exist by the time the pass
+      // runs, which is all the pass reads them for here.
+      session.innerWin = viewerWithPages([1, 2]);
+      session.documentId = "fcp:counted";
       await timers.fireNext();
 
       assert.equal(painted.length, 1);
@@ -525,6 +566,8 @@ describe("reader session: settled geometry re-check after a toolbar toggle", () 
       session.overlays.set(4, unpainted);
 
       session.setEnabled(true);
+      session.innerWin = viewerWithPages([1, 2, 3, 4]);
+      session.documentId = "fcp:moved";
       await timers.fireNext();
 
       assert.deepEqual(painted, [stale], "the stale page is corrected, the aligned pages are left alone");
@@ -532,6 +575,95 @@ describe("reader session: settled geometry re-check after a toolbar toggle", () 
       assert.equal(unpainted.geometryStaleCalls, 0, "a page without regions has nothing to correct");
       assert.equal(session.timers.size, 0, "the check releases its timer when it runs");
       assert.equal(session.settledCheckTimer, null);
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("re-attaches a page whose canvases left with a recycled page view", async () => {
+    const timers = fakeTimers();
+    try {
+      resetWarnOnce();
+      const session = newSession(fakeReader(547));
+      const painted = paintSpy(session);
+      // Scrolling back through the document: the viewer recycled this page's view,
+      // so the canvases the record painted went out of the document with the old
+      // div. The viewport, the scale and the rotation all held, so `geometryStale()`
+      // reads "aligned" and the record still says painted — grey figures, forever.
+      const dropped = settledOverlay(1, { mounted: false });
+      dropped.pageView = { id: 1, div: {} };
+      session.overlays.set(1, dropped);
+
+      session.setEnabled(true);
+      const realm = viewerWithPages([1]);
+      const liveView = realm.PDFViewerApplication.pdfViewer._pagesView[0];
+      session.innerWin = realm;
+      session.documentId = "fcp:dropped";
+      const attached = [];
+      const attachPageNumber = session.attachPageNumber.bind(session);
+      session.attachPageNumber = (pageNumber) => {
+        attached.push(pageNumber);
+        return attachPageNumber(pageNumber);
+      };
+
+      await timers.fireNext();
+
+      assert.deepEqual(attached, [1], "the page is healed through the re-attach route, not a bare repaint");
+      assert.equal(dropped.pageView, liveView, "the record is re-bound to the page view the viewer rebuilt");
+      assert.deepEqual(painted, [dropped], "and its colours are mounted again");
+      assert.equal(session.settledRepaints, 1, "one healed page, counted once");
+      session.destroy();
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("skips a page whose viewport held and whose canvases are still mounted", async () => {
+    const timers = fakeTimers();
+    try {
+      resetWarnOnce();
+      const session = newSession(fakeReader(549));
+      const painted = paintSpy(session);
+      const aligned = settledOverlay(1);
+      session.overlays.set(1, aligned);
+
+      session.setEnabled(true);
+      session.innerWin = viewerWithPages([1]);
+      session.documentId = "fcp:aligned";
+      const attached = spy(session, "attachPageNumber");
+
+      await timers.fireNext();
+
+      assert.equal(attached.n, 0, "nothing moved, so the page is not even routed for re-attach");
+      assert.equal(painted.length, 0, "so a settled pass repaints none of it");
+      assert.equal(session.settledRepaints, 0, "and the counter is not a per-page tally");
+      session.destroy();
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("heals a moved page and a dropped page in one pass, and leaves the third", async () => {
+    const timers = fakeTimers();
+    try {
+      resetWarnOnce();
+      const session = newSession(fakeReader(551));
+      const painted = paintSpy(session);
+      const moved = settledOverlay(1, { stale: true });
+      const dropped = settledOverlay(2, { mounted: false });
+      const aligned = settledOverlay(3);
+      session.overlays.set(1, moved);
+      session.overlays.set(2, dropped);
+      session.overlays.set(3, aligned);
+
+      session.setEnabled(true);
+      session.innerWin = viewerWithPages([1, 2, 3]);
+      session.documentId = "fcp-both";
+      await timers.fireNext();
+
+      assert.deepEqual(painted, [moved, dropped], "both kinds of damage are healed, the correct page is left alone");
+      assert.equal(session.settledRepaints, 2, "and the counter reports exactly the healed pages");
+      session.destroy();
     } finally {
       timers.restore();
     }
@@ -557,6 +689,8 @@ describe("reader session: settled geometry re-check after a toolbar toggle", () 
       assert.equal(timers.pending(), 1, "toggling twice in a row keeps a single settled check");
       assert.equal(timers.lastDelay(), SETTLED_REPAINT_MS);
 
+      session.innerWin = viewerWithPages([1]);
+      session.documentId = "fcp:stack";
       await timers.fireNext();
       assert.equal(painted.length, 1, "the cancelled pass never ran, so exactly one correction happens");
       assert.equal(timers.pending(), 0);
@@ -599,23 +733,6 @@ describe("reader session: fresh-open paint gaps", () => {
   /** Count of `no-event-bus` lines in the ring, for the once-per-realm checks. */
   function busWarnings() {
     return getWarnLog().filter((line) => line.startsWith("no-event-bus")).length;
-  }
-
-  /** A page view that has a rendered page, a div and a viewport, i.e. paintable. */
-  function renderedPageView(id) {
-    return {
-      id,
-      pdfPage: {},
-      div: { style: {}, appendChild() {} },
-      viewport: {
-        scale: 1,
-        width: 612,
-        height: 792,
-        rotation: 0,
-        transform: [1, 0, 0, -1, 0, 792],
-        convertToViewportPoint: (x, y) => [x, 792 - y],
-      },
-    };
   }
 
   it("does not declare readiness while the event bus is unresolved", async () => {

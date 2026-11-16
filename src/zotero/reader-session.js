@@ -1530,6 +1530,21 @@ export class ReaderSession {
    * every page that aligned correctly. `paintOverlay` reuses the cached regions
    * and reads the page's current viewport inside itself, so a warm RegionCache
    * means no new detection.
+   *
+   * The second thing this pass has to heal is a page that lost its canvases
+   * without anything moving. Scrolling recycles a page view and the viewer builds
+   * a new one, and the canvases that hung in the old `pageView.div` go out of the
+   * document with it. Nothing a geometry check reads changes in that moment — same
+   * viewport, same scale, same rotation — so a pass that looked only at
+   * `geometryStale()` skipped the page and left the record reading `painted` over
+   * canvases nobody would mount again: grey figures until the next toolbar toggle.
+   * Each page is therefore asked about both conditions, `geometryStale()` and
+   * `isMounted()`, and the ones that fail either are healed through
+   * `attachPageNumber()` rather than a bare `paintOverlay()`, because the usual
+   * reason the canvases are gone is that the page view itself was replaced and
+   * only `attachPageView()` re-binds the record to the live view. A page that
+   * failed neither is skipped, which is what keeps a settled pass free for the
+   * pages that aligned correctly.
    */
   scheduleSettledCheck() {
     if (this.destroyed) return;
@@ -1545,8 +1560,19 @@ export class ReaderSession {
         try {
           if (!overlay || overlay.destroyed) continue;
           if (!overlay.regionBoxes.length) continue;
-          if (overlay.geometryStale() !== true) continue;
-          this.track(overlay, this.paintOverlay(overlay));
+          // Two ways a painted page stops being correct: the viewport it was painted
+          // for moved, or the canvases are no longer in the document the viewer shows
+          // now. Neither: the page aligned and is still visible, so the pass costs it
+          // nothing. An overlay that does not report mounting is taken at its word.
+          const mounted = typeof overlay.isMounted === "function" ? overlay.isMounted() : true;
+          if (overlay.geometryStale() !== true && mounted !== false) continue;
+          // The re-attach route, not a bare repaint: a page whose canvases left
+          // usually left because the viewer rebuilt its page view, and only
+          // `attachPageView()` re-binds the record to the live one. Null means there
+          // is no page view to attach to yet — `pagerendered` paints it when it comes.
+          const job = this.attachPageNumber(overlay.pageNumber);
+          if (!job) continue;
+          this.track(overlay, job);
           // Counting here, not inside `paintOverlay`, so the number means exactly
           // "a page the settled pass had to heal".
           this.settledRepaints += 1;
