@@ -198,10 +198,25 @@ function fakeReader(tag) {
   return { _iframe: null, tabID: tag, getIFrame: () => null };
 }
 
+/**
+ * The temporary counter line of a rendered toggle: the text of the `fg-count` span
+ * inside the chip, or the native `title` in a realm that cannot attach children.
+ *
+ * @param {object} button
+ * @returns {string}
+ */
+function counterText(button) {
+  const span = (button?.children ?? []).find((child) => child?.className === "fg-count");
+  return String(span?.textContent ?? button?.title ?? "");
+}
+
+/** The counter pattern, without the tooltip's leading name. */
+const COUNTERS = /^p(\d+) t(\d+) c(\d+) D(\d+) W(\d+) O(\d+) B(\d+) U(\d+) a([01]) (\d+)x(\d+)$/;
+
 installFakeZotero();
 
 describe("toolbar toggle: the text button it builds", () => {
-  it("mounts a plain text button named by its label, with no child elements", () => {
+  it("mounts a plain text button named by its label, with only the counter line inside", () => {
     shutdown();
     installFakeZotero();
     startup({ id: "toggle-test", version: "0.5.0" });
@@ -209,11 +224,22 @@ describe("toolbar toggle: the text button it builds", () => {
 
     assert.ok(button, "the toolbar render still produced a button");
     assert.equal(button.textContent, BUTTON_LABEL, "the button is its label: 原色, no icon");
-    assert.equal(button.children.length, 0, "no img and no label span are built any more");
+    assert.equal(
+      button.children.length,
+      1,
+      "the only child is the temporary counter span: no img and no label element",
+    );
+    assert.equal(button.children[0].className, "fg-count", "the counter line carries its own class");
+    assert.ok(!button.title, "no native title: a tooltip window must not eat the press");
+    assert.equal(
+      button.attributes.get("aria-label"),
+      BUTTON_TITLE,
+      "the long name survives as the accessible name",
+    );
     assert.match(
-      button.title,
-      /^图表原色显示 p0 t0 c0 D0 W0 O0 B0 U0 a1 0x0$/,
-      "the tooltip names the toggle, starts every temporary counter at zero, and reports the node the toolbar has just attached",
+      counterText(button),
+      /^p0 t0 c0 D0 W0 O0 B0 U0 a1 0x0$/,
+      "the read-out starts every temporary counter at zero and reports the node the toolbar has just attached",
     );
     assert.equal(button.type, "button", "a plain button, never a form submit");
     assert.equal(button.className, "fg-toggle", "the class name keeps the fg- prefix");
@@ -327,11 +353,9 @@ describe("toolbar toggle: activation delegated to the toolbar document", () => {
     assert.equal(pressed(), "true", "a keyboard click outside the box is ignored too");
   });
 
-  it("keeps the temporary counters in the tooltip", () => {
-    const parts = ctx.button.title.match(
-      /^图表原色显示 p(\d+) t(\d+) c(\d+) D(\d+) W(\d+) O(\d+) B(\d+) U(\d+) a([01]) (\d+)x(\d+)$/,
-    );
-    assert.ok(parts, `the tooltip still carries the diagnostic counters: ${ctx.button.title}`);
+  it("keeps the temporary counters in the chip, not in a native tooltip", () => {
+    const parts = counterText(ctx.button).match(COUNTERS);
+    assert.ok(parts, `the chip still carries the diagnostic counters: ${counterText(ctx.button)}`);
     const [presses, toggles, clicks, docs] = parts.slice(1).map(Number);
     assert.ok(docs > presses, "the misses above raised the document count without raising the accepted one");
     assert.ok(presses > 0 && clicks > 0, "and the accepted counts moved as well");
@@ -426,12 +450,11 @@ describe("toolbar toggle: one press, every target, one action", () => {
   let ctx = null;
   const BOX = { left: 100, top: 20, width: 60, height: 24 };
   const pressed = () => ctx.button.attributes.get("aria-pressed");
-  /** Reads the temporary counters back out of the tooltip. */
+  /** Reads the temporary counters back out of the chip's own read-out. */
   const counts = () => {
-    const parts = ctx.button.title.match(
-      /^图表原色显示 p(\d+) t(\d+) c(\d+) D(\d+) W(\d+) O(\d+) B(\d+) U(\d+) a([01]) (\d+)x(\d+)$/,
-    );
-    assert.ok(parts, `the tooltip carries every counter: ${ctx.button.title}`);
+    const text = counterText(ctx.button);
+    const parts = text.match(COUNTERS);
+    assert.ok(parts, `the chip carries every counter: ${text}`);
     return parts.slice(1).map(Number);
   };
   /** The three objects the toggle binds: document, its window, the node. */
@@ -497,7 +520,7 @@ describe("toolbar toggle: one press, every target, one action", () => {
     assert.deepEqual([P, T, B], [0, 0, 0], "and it moved no press counter at all");
   });
 
-  it("reports the connected state and the rounded box in the tooltip", () => {
+  it("reports the connected state and the rounded box in the chip", () => {
     mount(60.4, 24.6);
     // Any event repaints the tooltip, so the state is read after one.
     fireAll(ctx, "pointerup", { button: 0, clientX: BOX.left + 5, clientY: BOX.top + 5, target: ctx.button });

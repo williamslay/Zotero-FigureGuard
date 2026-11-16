@@ -48,6 +48,8 @@ export const BUTTON_TITLE = "图表原色显示";
 /** Class and style-node id for the toolbar toggle's injected stylesheet. */
 const TOGGLE_CLASS = "fg-toggle";
 const TOGGLE_STYLE_ID = "fg-toggle-style";
+/** Class of the temporary read-out rendered inside the toggle. */
+const COUNT_CLASS = "fg-count";
 
 /**
  * Stylesheet for the toolbar toggle, injected once per toolbar document. The
@@ -98,6 +100,21 @@ const TOGGLE_CSS = `
 }
 .${TOGGLE_CLASS}[aria-pressed="true"]:active {
   background-color: #0166cc;
+}
+/*
+ * TEMPORARY real-machine read-out, kept while the single-click report is open. The
+ * counters used to live in the button's native title attribute, and a native
+ * tooltip is a window of its own: a press landing while it is up may never reach
+ * this document.
+ * Rendering the counters inside the chip removes that possibility and keeps them
+ * readable without hovering. Delete this rule with the counters.
+ */
+.${TOGGLE_CLASS} .${COUNT_CLASS} {
+  margin-inline-start: 6px;
+  font-size: 11px;
+  opacity: 0.75;
+  white-space: nowrap;
+  pointer-events: none;
 }
 `;
 
@@ -333,7 +350,11 @@ function createButton(doc, session) {
   ensureToggleStyles(doc);
   const button = doc.createElement("button");
   button.textContent = BUTTON_LABEL;
-  button.title = BUTTON_TITLE;
+  // No native `title`: a native tooltip is a separate window, and a press that
+  // lands while it is up can be spent dismissing it instead of reaching this
+  // document. The label is already the word on the chip; the accessible name
+  // carries the long form.
+  button.setAttribute("aria-label", BUTTON_TITLE);
   button.type = "button";
   button.className = TOGGLE_CLASS;
   // The Zotero toolbar is a React tree: pointer events are enabled locally so
@@ -369,30 +390,47 @@ function createButton(doc, session) {
   // pointerdown already acted. No timer reconciles the two — each event decides
   // on its own.
   //
-  // TEMPORARY real-machine diagnostic, kept while the toolbar double-click
-  // report is open, and the only reason the binding below is deliberately
-  // duplicated across targets. `P`, `C` and `T` are what this button accepted
-  // and what it really toggled. `D`, `W`, `O` and `B` count every pointerdown
-  // the document, the window, the node's own document and the node itself saw,
-  // before any other check, so whichever one rises names the object the press
-  // flowed through. `U` counts pointerup once per event object, which exposes a
-  // Windows activation press whose pointerdown was swallowed while its
-  // pointerup arrived. A first press that raises none of `D W O B` never reached
-  // any object this button bound to. Delete this block, the raw counters and the
-  // multi-target binding once the fix is verified on a real machine.
+  // TEMPORARY real-machine diagnostic, kept while the single-click report is open,
+  // and the only reason the binding below is deliberately duplicated across
+  // targets. `P`, `C` and `T` are what this button accepted and what it really
+  // toggled. `D`, `W`, `O` and `B` count every pointerdown the document, the
+  // window, the node's own document and the node itself saw, before any other
+  // check, so whichever one rises names the object the press flowed through. `U`
+  // counts pointerup once per event object, which exposes a Windows activation
+  // press whose pointerdown was swallowed while its pointerup arrived. A press
+  // that raises none of `D W O B` never reached any object this button bound to,
+  // which is what a native tooltip dismissing on top of the chip would look like.
+  // Delete this block, the raw counters and the multi-target binding once the fix
+  // is verified on a real machine.
   const seen = { P: 0, T: 0, C: 0, D: 0, W: 0, O: 0, B: 0, U: 0 };
   /** Event objects this button already acted on: several targets, one toggle. */
   const acted = new WeakSet();
   /** Pointerup events already counted: several targets, one `U`. */
   const countedUp = new WeakSet();
+  /**
+   * The chip's own counter line, so the read-out is visible without hovering and
+   * no native tooltip window sits between the pointer and this document. Null when
+   * the realm refused the node, in which case the counters fall back to `title`.
+   * @type {object|null}
+   */
+  let counter = null;
+  try {
+    counter = doc.createElement("span");
+    counter.className = COUNT_CLASS;
+    button.appendChild(counter);
+  } catch (ignored) {
+    counter = null;
+  }
   const paintSeen = () => {
     try {
       const rect = button.getBoundingClientRect?.();
       const rw = rect ? Math.round(rect.width) || 0 : 0;
       const rh = rect ? Math.round(rect.height) || 0 : 0;
-      button.title = `${BUTTON_TITLE} p${seen.P} t${seen.T} c${seen.C} D${seen.D} W${seen.W} O${seen.O} B${seen.B} U${seen.U} a${button.isConnected ? 1 : 0} ${rw}x${rh}`;
+      const text = `p${seen.P} t${seen.T} c${seen.C} D${seen.D} W${seen.W} O${seen.O} B${seen.B} U${seen.U} a${button.isConnected ? 1 : 0} ${rw}x${rh}`;
+      if (counter) counter.textContent = text;
+      else button.title = text;
     } catch (ignored) {
-      // A tooltip that cannot be rewritten still leaves the counters correct.
+      // A read-out that cannot be rewritten still leaves the counters correct.
     }
   };
   paintSeen();
@@ -456,10 +494,10 @@ function createButton(doc, session) {
       paintSeen();
     }
   };
-  // The tooltip is what carries this diagnostic, and a tooltip reads the title at
-  // the moment the pointer arrives. Repainting on the pointer entering any bound
-  // object means the reported attachment flag and box describe the node as it is
-  // when it is being looked at, not as it was at the last press.
+  // The read-out is inline now, but a hover still refreshes it: repainting when the
+  // pointer enters any bound object means the reported attachment flag and box
+  // describe the node as it is when it is being looked at, not as it was at the
+  // last press.
   const onHover = () => paintSeen();
 
   /**
@@ -701,7 +739,7 @@ function onRenderToolbar(event) {
     const button = createButton(doc, session);
     event.append(button);
     // The counters are painted while the node has no place in the toolbar yet, so
-    // the tooltip of a button nobody has pressed would report a node that is
+    // a read-out of a button nobody has pressed would report a node that is
     // neither attached nor sized. Repainting once the append returned keeps that
     // temporary read-out honest: it describes the node as the toolbar has it.
     try {
