@@ -313,6 +313,7 @@ describe("probeAll: reports every live reader", () => {
         "target",
         "mountDetached",
         "scale",
+        "button",
       ],
     );
     assert.equal(entry.ready, true);
@@ -350,6 +351,12 @@ describe("probeAll: reports every live reader", () => {
     assert.deepEqual(entry.target.liveViewport, { width: null, height: null, scale: null, rotation: null });
     assert.equal(entry.target.hostBox.clientWidth, 612, "the positioning host box is reported");
     assert.equal(entry.target.regions[0].offsetParent, null, "a canvas with no host element has no label");
+    assert.deepEqual(
+      entry.button,
+      { mounted: false, hasParent: false, hasAppend: true },
+      "this harness render hands the node to its own append callback, which records no parent, so the probe says the toggle is not mounted",
+    );
+    assert.equal(entry.buttonError, undefined);
 
     assert.ok(result.log.every((line) => typeof line === "string" && !line.includes("\n")));
     assert.equal(result.sessions[2].currentPage, 1);

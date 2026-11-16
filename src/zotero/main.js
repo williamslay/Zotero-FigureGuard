@@ -315,6 +315,50 @@ function detachButton(session) {
 }
 
 /**
+ * Puts a toggle back in the toolbar after the toolbar threw it away. The
+ * real-machine symptom is a switch that still works — the delegated activation
+ * listeners sit on the document, so a press aimed at the right place reaches the
+ * session — while the node itself is gone and no further `renderToolbar` comes to
+ * re-append it, which is why neither a tab switch nor a restart brought it back.
+ *
+ * A link is remounted only when its own node is out of the document and the
+ * toolbar document holds no `.fg-toggle` at all, so a repair can never produce a
+ * second switch. The node's recorded parent is used while that parent is still in
+ * the document, because it restores the exact slot the toolbar had; a parent the
+ * toolbar replaced falls back to the render's own `append` callback, which can
+ * throw outside the render it came from. A link whose repair fails is logged and
+ * left as it is: one hostile or half-built realm must not stop the other tabs.
+ *
+ * @returns {number} How many toggles this pass put back.
+ */
+export function maintainButtons() {
+  let remounted = 0;
+  for (const link of Array.from(buttonLinks.values())) {
+    try {
+      const node = link?.button;
+      if (!node || node.isConnected !== false) continue;
+      // Another of our switches is still on screen in this document: this session's
+      // box belongs to a hidden reader tab, and appending would double the toolbar.
+      if ((link.toolbarDoc?.querySelectorAll?.(`.${TOGGLE_CLASS}`)?.length ?? 0) > 0) continue;
+      if (typeof link.parent?.appendChild === "function" && link.parent.isConnected) {
+        link.parent.appendChild(node);
+      } else if (typeof link.append === "function") {
+        link.append(node);
+      } else {
+        warnOnce("button-reattach", new Error("toggle has neither a live parent nor an append callback"));
+        continue;
+      }
+      remounted += 1;
+      // The temporary read-out has to describe the node as the toolbar has it now.
+      link.paint?.();
+    } catch (err) {
+      warnOnce("button-reattach", err);
+    }
+  }
+  return remounted;
+}
+
+/**
  * Injects TOGGLE_CSS into a toolbar document once. The style text is a plain
  * string, so creating the node in the reader realm carries no cross-realm risk.
  *
@@ -385,17 +429,32 @@ function createButton(doc, session) {
   // however the toolbar rebuilt itself underneath it. One body acts on an event
   // object at most once, so the outermost target that sees the press toggles and
   // the inner ones only report that they saw it.
-  // Pointer presses act on pointerdown, immediately and with no
-  // preventDefault, so the browser keeps its normal focus behaviour; the click
-  // listener exists only for the keyboard, whose click carries detail === 0,
-  // while every mouse click carries detail >= 1 and is ignored because
-  // pointerdown already acted. No timer reconciles the two — each event decides
-  // on its own.
+  // Activation is a three-rung ladder — pointerdown, then mouseup, then click —
+  // and one press sequence moves the session exactly once. Pointer presses act on
+  // pointerdown, immediately and with no preventDefault, so the browser keeps its
+  // normal focus behaviour. Mouseup is the middle rung: the single-click symptom
+  // reaches us with no pointerdown on any object this button bound, while Zotero's
+  // own toolbar buttons are known to act on mouseup, so a release whose press was
+  // eaten still has to carry the activation. Click is the last rung, and also the
+  // only event a keyboard activation produces, whose click carries detail === 0.
+  //
+  // The shared pressActivated flag is what keeps the rungs from stacking. Every
+  // pointerdown that passes the primary-button and once-per-event checks clears
+  // it, so a new sequence starts unfired. Acting on a pointerdown or on a mouseup
+  // raises it. A click that finds it raised only closes the sequence and lowers it
+  // again; a mouseup that finds it raised leaves it raised, because the click after
+  // it still has to be told to stand down. A keyboard click is never gated by the
+  // flag: no pointer event precedes a key press, so one left over from an earlier
+  // mouse action must not swallow the keyboard, and the keyboard click closes its
+  // own sequence. No timer reconciles the rungs — each event decides on its own.
   //
   // TEMPORARY real-machine diagnostic, kept while the single-click report is open,
   // and the only reason the binding below is deliberately duplicated across
-  // targets. `P`, `C` and `T` are what this button accepted and what it really
-  // toggled. `D`, `W`, `B`, `M` and `I` count every pointerdown the toolbar
+  // targets. `P`, `C`, `m`, `k` and `T` are what this button accepted and what it
+  // really toggled: `p` from a pointerdown, `c` from a keyboard click, `m` from a
+  // mouse click and `k` from a mouseup, each of them accepted only because no
+  // pointerdown of the same press acted first — one of the two lower rungs rising
+  // is the single-click symptom itself. `D`, `W`, `B`, `M` and `I` count every pointerdown the toolbar
   // document, its window, the node, the main-window document and the reader's
   // inner document saw, before any other check, so whichever one rises names the
   // object the press flowed through; a role whose target is the same object as
@@ -409,11 +468,22 @@ function createButton(doc, session) {
   // `D W B M I` never reached any object this button bound to. Delete this
   // block, the raw counters and the multi-target binding once the fix
   // is verified on a real machine.
-  const seen = { P: 0, T: 0, C: 0, D: 0, W: 0, B: 0, M: 0, I: 0, U: 0 };
+  const seen = { P: 0, T: 0, C: 0, MC: 0, K: 0, D: 0, W: 0, B: 0, M: 0, I: 0, U: 0 };
   /** Event objects this button already acted on: several targets, one toggle. */
   const acted = new WeakSet();
   /** Pointerup events already counted: several targets, one `U`. */
   const countedUp = new WeakSet();
+  /**
+   * Whether the current press sequence already acted, so the rungs after it in the
+   * ladder — mouseup, then click — suppress themselves instead of toggling twice.
+   * Every pointerdown past the primary-button and once-per-event checks clears it;
+   * acting on a pointerdown or on a mouseup raises it, and a mouseup that finds it
+   * raised leaves it raised so the click after it still stands down. A click that
+   * finds it raised lowers it again, closing the sequence; a keyboard click ignores
+   * it and closes its own sequence, because no pointer event ever precedes a key.
+   * @type {boolean}
+   */
+  let pressActivated = false;
   /**
    * The last pointerdown any bound object saw, even one the hit test rejected:
    * its rounded client coordinates and a short description of its target. Both
@@ -487,7 +557,7 @@ function createButton(doc, session) {
       const at = lastDown.x === null ? "@-,-" : `@${lastDown.x},${lastDown.y}`;
       const what = `x=${lastDown.desc ?? "?"}`;
       const lt = rect ? `LT=${Math.round(rect.left)}x${Math.round(rect.top)}` : "LT=?x?";
-      const text = `p${seen.P} t${seen.T} c${seen.C} D${seen.D} W${seen.W} B${seen.B} M${seen.M} I${seen.I} U${seen.U} a${button.isConnected ? 1 : 0} ${rw}x${rh} ${at} ${what} ${lt}`;
+      const text = `p${seen.P} t${seen.T} c${seen.C} m${seen.MC} k${seen.K} D${seen.D} W${seen.W} B${seen.B} M${seen.M} I${seen.I} U${seen.U} a${button.isConnected ? 1 : 0} ${rw}x${rh} ${at} ${what} ${lt}`;
       if (counter) counter.textContent = text;
       else button.title = text;
     } catch (ignored) {
@@ -519,10 +589,14 @@ function createButton(doc, session) {
     try {
       if (event?.button !== 0) return;
       if (acted.has(event)) return;
+      // A new press sequence starts here: until this pointer acts, neither the
+      // release nor the click that follows has a press behind it.
+      pressActivated = false;
       if (!hitToggle(event)) return;
       acted.add(event);
       seen.P += 1;
       seen.T += 1;
+      pressActivated = true;
       session.toggle();
     } catch (err) {
       warnOnce("button-press", err);
@@ -530,14 +604,48 @@ function createButton(doc, session) {
       paintSeen();
     }
   };
-  const onClick = (event) => {
+  const onMouseUp = (event) => {
     try {
-      if (event?.detail !== 0) return;
+      if (event?.button !== 0) return;
       if (acted.has(event)) return;
       if (!hitToggle(event)) return;
       acted.add(event);
-      seen.C += 1;
+      if (pressActivated) {
+        // The pointerdown of this press already acted. The release leaves the flag
+        // raised on purpose: the click that follows still has to be stopped.
+        return;
+      }
+      // The press itself never reached us — the middle rung carries it.
       seen.T += 1;
+      seen.K += 1;
+      pressActivated = true;
+      session.toggle();
+    } catch (err) {
+      warnOnce("button-release", err);
+    } finally {
+      paintSeen();
+    }
+  };
+  const onClick = (event) => {
+    try {
+      if (acted.has(event)) return;
+      if (!hitToggle(event)) return;
+      acted.add(event);
+      const keyboard = event?.detail === 0;
+      if (!keyboard && pressActivated) {
+        // The pointerdown or the release of this same press already toggled: the
+        // click only closes the press, so it stands down and leaves the flag clear
+        // for the next one.
+        pressActivated = false;
+        return;
+      }
+      seen.T += 1;
+      if (keyboard) seen.C += 1;
+      else seen.MC += 1;
+      // A key press is a sequence of its own, with no pointer event around it, so
+      // a flag left over from an earlier mouse action neither stops it nor survives
+      // it.
+      pressActivated = false;
       session.toggle();
     } catch (err) {
       warnOnce("button-click", err);
@@ -625,8 +733,8 @@ function createButton(doc, session) {
     if (typeof target.addEventListener !== "function") return;
     // Only the press body needs its own wrapper, because the raw counter has to
     // say which object saw the press and the last-press read-out has to record
-    // the sighting before the hit test can reject it; the keyboard and pointerup
-    // bodies are shared and settle the duplicates themselves.
+    // the sighting before the hit test can reject it; the release, click and
+    // pointerup bodies are shared and settle the duplicates themselves.
     const pointerDown = (event) => {
       seen[raw] += 1;
       recordDown(event);
@@ -642,6 +750,7 @@ function createButton(doc, session) {
     };
     bind("pointerdown", pointerDown);
     bind("pointerup", onPointerUp);
+    bind("mouseup", onMouseUp);
     bind("click", onClick);
     bind("pointerover", onHover);
   };
@@ -661,7 +770,20 @@ function createButton(doc, session) {
 
   const off = session.addListener(applyState);
   applyState();
-  buttonLinks.set(session, { button, session, bindings, off, paint: paintSeen });
+  buttonLinks.set(session, {
+    button,
+    session,
+    bindings,
+    off,
+    paint: paintSeen,
+    // Filled in by the render that appends this node, once the append returned:
+    // the document this toolbar belongs to, the append callback it offered, and
+    // the parent the node ended up under. They are what maintainButtons() needs to
+    // put the switch back after the toolbar's own re-render clears it out.
+    toolbarDoc: doc ?? null,
+    append: null,
+    parent: null,
+  });
   return button;
 }
 
@@ -852,6 +974,16 @@ function onRenderToolbar(event) {
     if (!doc?.createElement) return;
     const button = createButton(doc, session);
     event.append(button);
+    // The append returned, so this is the moment the link can record how the node
+    // was mounted: the toolbar document it lives in, the callback that mounted it
+    // and the parent it ended up under. The callback is kept bound to the event it
+    // arrived on, because the render is long gone by the time a repair calls it.
+    const link = buttonLinks.get(session);
+    if (link) {
+      link.toolbarDoc = doc;
+      link.append = typeof event.append === "function" ? event.append.bind(event) : null;
+      link.parent = button.parentNode ?? null;
+    }
     // The counters are painted while the node has no place in the toolbar yet, so
     // a read-out of a button nobody has pressed would report a node that is
     // neither attached nor sized. Repainting once the append returned keeps that
@@ -1039,6 +1171,14 @@ export const wakeStats = { count: 0, nullTarget: 0 };
 
 export function wakeTabSessions(event, ids, extra) {
   if (event !== "select" && event !== "load") return;
+  // A tab switch is the moment the switch gets put back after the toolbar cleared
+  // it out: the switch is what the user is looking at, and its own render is not
+  // coming until the panel is rebuilt.
+  try {
+    maintainButtons();
+  } catch (err) {
+    warnOnce("button-maintain", err);
+  }
   const zotero = getZotero();
   const rawIds = Array.isArray(ids) ? ids : ids === undefined || ids === null ? [] : [ids];
   const tabIds = rawIds.filter((id) => id !== undefined && id !== null);
@@ -1467,7 +1607,11 @@ function readRealm(innerWin, tag = "") {
  * `scale` (`currentScale`/`currentScaleValue`/`defaultZoomValue`,
  * the zoom the viewer reports now, so a `target.lastPaintGeometry` vs
  * `target.liveViewport` mismatch can be read against the value a fit-width relayout
- * settled on), `target` (plus `targetError`). `target` is `probeOverlay`'s evidence:
+ * settled on), `target` (plus `targetError`), and last `button` — `mounted` whether
+ * this session's toggle is in the document now, `hasParent`/`hasAppend` whether a
+ * repair has a parent node or a render append callback to put it back with, plus
+ * `buttonError`, and `null` when the session never rendered a toolbar.
+ * `target` is `probeOverlay`'s evidence:
  * the viewport captured at the last paint (`lastPaintGeometry`), the viewport read
  * while probing (`liveViewport`), the host box and the resolved theme custom
  * properties (`hostBox`, `cssVars`), and, per canvas, its own `getBoundingClientRect`
@@ -1626,6 +1770,22 @@ function describeSession(session) {
     }
   } catch (err) {
     entry.targetError = err?.message ?? String(err);
+  }
+  // Whether this session's toggle is actually in the toolbar right now, plus what a
+  // repair would have to work with: `hasParent` the recorded parent node, `hasAppend`
+  // the render's own append callback. A mounted false with both false is a switch no
+  // repair can bring back, which is the case `warnOnce("button-reattach")` reports.
+  try {
+    const link = buttonLinks.get(session);
+    entry.button = link
+      ? {
+          mounted: Boolean(link.button?.isConnected),
+          hasParent: Boolean(link.parent),
+          hasAppend: typeof link.append === "function",
+        }
+      : null;
+  } catch (err) {
+    entry.buttonError = err?.message ?? String(err);
   }
   return entry;
 }
