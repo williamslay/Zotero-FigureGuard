@@ -16,9 +16,9 @@ import {
  * belongs to the plug-in list (the manifest `icons` entries), not to the
  * reader toolbar. These tests pin the text button the renderToolbar handler
  * mounts — its name, its aria-pressed state wiring — the activation delegated to
- * the toolbar document, which survives the React tree replacing the node we
- * appended, and the packaged icon asset the manifest still ships for the add-on
- * manager.
+ * every object a press can flow through (window, toolbar document, node), which
+ * survives the React tree replacing the node we appended, and the packaged icon
+ * asset the manifest still ships for the add-on manager.
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -54,13 +54,14 @@ function installFakeZotero() {
 }
 
 /**
- * A toolbar realm stand-in. The document and every element record their
- * listeners together with the capture flag, and every `removeEventListener`
- * call, so tests can fire document-level events and pin exactly what detach
- * unbound. A fresh element is zero-size, like the toggle of a reader tab that
- * is not the visible one; `place` puts one on screen. `withAppendChild: false`
- * is the degraded shape the existing harness stubs have: elements are creatable
- * but nothing can be attached, and the text button must keep working there.
+ * A toolbar realm stand-in. The window, the document and every element record
+ * their listeners together with the capture flag, and every `removeEventListener`
+ * call, so tests can fire one event at every object the toggle binds to and pin
+ * exactly what detach unbound. A fresh element is zero-size, like the toggle of
+ * a reader tab that is not the visible one; `place` puts one on screen.
+ * `withAppendChild: false` is the degraded shape the existing harness stubs
+ * have: elements are creatable but nothing can be attached, and the text button
+ * must keep working there.
  *
  * @param {{withAppendChild?: boolean}} [options]
  */
@@ -126,11 +127,16 @@ function fakeDoc({ withAppendChild = true } = {}) {
   };
 
   // The document itself is a node, because that is where the toggle's
-  // activation listeners are bound now.
+  // activation listeners are bound now, together with its window and the node.
   const doc = element("document");
+  doc.defaultView = element("window");
   doc.head = element("head");
   doc.documentElement = element("html");
-  doc.createElement = (tag) => element(tag);
+  doc.createElement = (tag) => {
+    const node = element(tag);
+    node.ownerDocument = doc;
+    return node;
+  };
   doc.getElementById = () => null;
   return doc;
 }
@@ -144,6 +150,21 @@ function place(node, left, top, width = 60, height = 24) {
 /** Fires every handler a fake node registered for `type`, capture included. */
 function fire(node, type, event = {}) {
   for (const entry of [...(node.listeners.get(type) ?? [])]) entry.handler(event);
+}
+
+/**
+ * Fires one event object the way capture propagation does: window, then
+ * document, then the node. The same object reaches every binding the toggle
+ * holds, which is exactly what its deduplication has to survive.
+ *
+ * @param {{doc: object, button: object}} target The render whose targets fire.
+ * @param {string} type The event type.
+ * @param {object} event One event object, shared by all three targets.
+ */
+function fireAll({ doc, button }, type, event) {
+  fire(doc.defaultView, type, event);
+  fire(doc, type, event);
+  fire(button, type, event);
 }
 
 /**
@@ -191,8 +212,8 @@ describe("toolbar toggle: the text button it builds", () => {
     assert.equal(button.children.length, 0, "no img and no label span are built any more");
     assert.match(
       button.title,
-      /^图表原色显示 p0 c0 d0 t0$/,
-      "the tooltip names the toggle and starts the temporary counters at zero",
+      /^图表原色显示 p0 t0 c0 D0 W0 O0 B0 U0 a1 0x0$/,
+      "the tooltip names the toggle, starts every temporary counter at zero, and reports the node the toolbar has just attached",
     );
     assert.equal(button.type, "button", "a plain button, never a form submit");
     assert.equal(button.className, "fg-toggle", "the class name keeps the fg- prefix");
@@ -240,10 +261,18 @@ describe("toolbar toggle: activation delegated to the toolbar document", () => {
     place(ctx.button, BOX.left, BOX.top, BOX.width, BOX.height);
     assert.equal(pressed(), "true", "the plugin starts enabled");
 
-    const bindings = ctx.doc.listeners.get("pointerdown");
-    assert.equal(bindings.length, 1, "the press handler is bound on the document, never on the node");
-    assert.equal(bindings[0].capture, true, "in the capture phase, so a re-render cannot swallow the press");
-    assert.equal(ctx.doc.listeners.get("click").length, 1, "the keyboard handler sits on the document too");
+    const bound = (node, type) => (node.listeners.get(type) ?? []).filter((entry) => entry.capture).length;
+    assert.deepEqual(
+      [bound(ctx.doc, "pointerdown"), bound(ctx.doc.defaultView, "pointerdown"), bound(ctx.button, "pointerdown")],
+      [1, 1, 1],
+      "the press path is bound once on the document, its window and the node, in the capture phase",
+    );
+    assert.deepEqual(
+      [bound(ctx.doc, "click"), bound(ctx.doc.defaultView, "click"), bound(ctx.button, "click")],
+      [1, 1, 1],
+      "and so is the keyboard path, on the same set of objects",
+    );
+    assert.equal(ctx.button.ownerDocument, ctx.doc, "the node's own document is the toolbar document, so it is bound once");
 
     let prevented = false;
     fire(ctx.doc, "pointerdown", {
@@ -299,48 +328,66 @@ describe("toolbar toggle: activation delegated to the toolbar document", () => {
   });
 
   it("keeps the temporary counters in the tooltip", () => {
-    const seen = ctx.button.title.match(/^图表原色显示 p(\d+) c(\d+) d(\d+) t(\d+)$/);
-    assert.ok(seen, `the tooltip still carries the diagnostic counters: ${ctx.button.title}`);
-    const [presses, clicks, docs, toggles] = seen.slice(1).map(Number);
+    const parts = ctx.button.title.match(
+      /^图表原色显示 p(\d+) t(\d+) c(\d+) D(\d+) W(\d+) O(\d+) B(\d+) U(\d+) a([01]) (\d+)x(\d+)$/,
+    );
+    assert.ok(parts, `the tooltip still carries the diagnostic counters: ${ctx.button.title}`);
+    const [presses, toggles, clicks, docs] = parts.slice(1).map(Number);
     assert.ok(docs > presses, "the misses above raised the document count without raising the accepted one");
     assert.ok(presses > 0 && clicks > 0, "and the accepted counts moved as well");
     assert.equal(presses + clicks, toggles, "every accepted event is exactly one toggle call");
+    assert.equal(ctx.doc.defaultView.listeners.get("pointerdown").length, 1, "every binding is still in place after all of that");
   });
 });
 
 describe("toolbar toggle: re-rendering unwinds the delegated listeners", () => {
-  it("detaches the old button: both document listeners gone, node out of the toolbar", () => {
+  it("detaches the old button: every listener gone from every target, node out of the toolbar", () => {
     const reader = fakeReader("re-render");
     const first = render({ reader });
     const second = render({ reader, container: first.container });
 
-    assert.deepEqual(
-      first.doc.unbound,
-      [
-        { type: "pointerdown", capture: true },
-        { type: "click", capture: true },
-      ],
-      "detach unbinds both document listeners, and only the capture-phase bindings match",
-    );
-    assert.deepEqual(first.doc.listeners.get("pointerdown"), [], "nothing is left bound to the old document");
-    assert.deepEqual(first.doc.listeners.get("click"), [], "for the press handler and for the click handler");
-    assert.equal(second.doc.listeners.get("pointerdown").length, 1, "the new document carries exactly the new pair");
-    assert.equal(second.doc.listeners.get("click").length, 1, "one press handler and one click handler");
+    // The three objects this button held bindings on: the toolbar document, its
+    // window and the node. The node's own document is the same object as the
+    // toolbar document, so it contributes no fourth set.
+    const targets = [first.doc, first.doc.defaultView, first.button];
+    for (const target of targets) {
+      assert.deepEqual(
+        target.unbound,
+        [
+          { type: "pointerdown", capture: true },
+          { type: "pointerup", capture: true },
+          { type: "click", capture: true },
+          { type: "pointerover", capture: true },
+        ],
+        "detach unbinds all four listeners from that target, and only the capture-phase bindings match",
+      );
+      for (const type of ["pointerdown", "pointerup", "click", "pointerover"]) {
+        assert.deepEqual(target.listeners.get(type), [], `nothing of the old button is left bound to ${target.tagName}`);
+      }
+    }
+    for (const type of ["pointerdown", "pointerup", "click", "pointerover"]) {
+      assert.equal(second.doc.listeners.get(type).length, 1, `the new document carries exactly one ${type} handler`);
+      assert.equal(second.doc.defaultView.listeners.get(type).length, 1, "on its window as well");
+      assert.equal(second.button.listeners.get(type).length, 1, "and on the new node");
+    }
     assert.equal(first.button.parentNode, null, "the old node is taken out of the toolbar, not left stacked");
     assert.deepEqual(first.container.children, [second.button], "the toolbar holds exactly the new button");
     assert.notEqual(first.button, second.button, "the render really replaced the node");
   });
 
-  it("leaves one listener pair per session however often one document re-rendered", () => {
+  it("leaves one listener set per session however often one document re-rendered", () => {
     const reader = fakeReader("same-document");
     const doc = fakeDoc();
     render({ reader, doc });
     render({ reader, doc });
     render({ reader, doc });
 
-    assert.equal(doc.listeners.get("pointerdown").length, 1, "three renders, still one press handler");
-    assert.equal(doc.listeners.get("click").length, 1, "and one click handler");
-    assert.equal(doc.unbound.length, 4, "each replaced button unbound its own pair, nothing else");
+    for (const type of ["pointerdown", "pointerup", "click", "pointerover"]) {
+      assert.equal(doc.listeners.get(type).length, 1, `three renders, still one ${type} handler on the document`);
+      assert.equal(doc.defaultView.listeners.get(type).length, 1, `and one on its window`);
+    }
+    assert.equal(doc.unbound.length, 8, "each replaced button unbound its own four, nothing else");
+    assert.equal(doc.defaultView.unbound.length, 8, "the same for the window it bound");
   });
 });
 
@@ -371,6 +418,126 @@ describe("toolbar toggle: two reader tabs sharing one toolbar document", () => {
       "true",
       "the background tab kept its state: its own listener rejected the zero-area box",
     );
+  });
+});
+
+describe("toolbar toggle: one press, every target, one action", () => {
+  /** One reader's toolbar realm, rebuilt per case, with the box of its toggle. */
+  let ctx = null;
+  const BOX = { left: 100, top: 20, width: 60, height: 24 };
+  const pressed = () => ctx.button.attributes.get("aria-pressed");
+  /** Reads the temporary counters back out of the tooltip. */
+  const counts = () => {
+    const parts = ctx.button.title.match(
+      /^图表原色显示 p(\d+) t(\d+) c(\d+) D(\d+) W(\d+) O(\d+) B(\d+) U(\d+) a([01]) (\d+)x(\d+)$/,
+    );
+    assert.ok(parts, `the tooltip carries every counter: ${ctx.button.title}`);
+    return parts.slice(1).map(Number);
+  };
+  /** The three objects the toggle binds: document, its window, the node. */
+  const targets = () => [ctx.doc, ctx.doc.defaultView, ctx.button];
+  const mounted = () =>
+    targets().flatMap((node) =>
+      ["pointerdown", "pointerup", "click", "pointerover"].map((type) => ({
+        what: `${node.tagName} ${type}`,
+        n: (node.listeners.get(type) ?? []).filter((entry) => entry.capture).length,
+      })),
+    );
+
+  /** Fresh plugin, fresh toolbar, one toggle laid out on screen. */
+  const mount = (width = BOX.width, height = BOX.height) => {
+    shutdown();
+    installFakeZotero();
+    startup({ id: "toggle-test", version: "0.5.0" });
+    ctx = render();
+    place(ctx.button, BOX.left, BOX.top, width, height);
+  };
+
+  it("toggles once for one press that window, document and node all report", () => {
+    mount();
+    assert.deepEqual(
+      mounted().map((entry) => entry.n),
+      [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+      "four listeners on each of the three objects, all capture phase",
+    );
+
+    // One event object, delivered the way capture does it: outermost first.
+    fireAll(ctx, "pointerdown", { button: 0, clientX: BOX.left + 5, clientY: BOX.top + 5, target: ctx.button });
+
+    assert.equal(pressed(), "false", "the press toggled");
+    const [P, T, C, D, W, O, B] = counts();
+    assert.equal(P, 1, "one accepted press, not three");
+    assert.equal(T, 1, "exactly one session.toggle call for three sightings");
+    assert.deepEqual([D, W, B], [1, 1, 1], "and each of the three objects says it saw the press");
+    assert.equal(O, 0, "the node's own document is the toolbar document, so it is not counted twice");
+    assert.equal(C, 0, "a pointer press never counts as a keyboard click");
+  });
+
+  it("counts a keyboard click once across the same three targets", () => {
+    mount();
+    const event = { button: 0, detail: 0, clientX: BOX.left + 5, clientY: BOX.top + 5, target: ctx.button };
+    fireAll(ctx, "click", event);
+
+    assert.equal(pressed(), "false", "the keyboard click toggled");
+    const [P, T, C, D] = counts();
+    assert.equal(C, 1, "one accepted click for three sightings of it");
+    assert.equal(T, 1, "and one toggle call");
+    assert.deepEqual([P, D], [0, 0], "a keyboard click is not a pointer press");
+  });
+
+  it("raises U without toggling when only the pointerup arrives", () => {
+    mount();
+    // The Windows activation press: the pointerdown never reached anything this
+    // button bound, but its release did.
+    fireAll(ctx, "pointerup", { button: 0, clientX: BOX.left + 5, clientY: BOX.top + 5, target: ctx.button });
+
+    assert.equal(pressed(), "true", "a lone pointerup must not toggle the session");
+    const [P, T, , , , , B, U] = counts();
+    assert.equal(U, 1, "the release counted once, though three objects saw it");
+    assert.deepEqual([P, T, B], [0, 0, 0], "and it moved no press counter at all");
+  });
+
+  it("reports the connected state and the rounded box in the tooltip", () => {
+    mount(60.4, 24.6);
+    // Any event repaints the tooltip, so the state is read after one.
+    fireAll(ctx, "pointerup", { button: 0, clientX: BOX.left + 5, clientY: BOX.top + 5, target: ctx.button });
+    assert.equal(counts()[8], 1, "our node is in the toolbar, so a is 1");
+    assert.equal(counts()[9], 60, "the reported width is the rounded rect width");
+    assert.equal(counts()[10], 25, "and the reported height is the rounded rect height");
+
+    ctx.container.removeChild(ctx.button);
+    fireAll(ctx, "pointerup", { button: 0, clientX: BOX.left + 5, clientY: BOX.top + 5, target: ctx.button });
+    assert.equal(counts()[8], 0, "the tooltip says so as soon as the node is out of the document");
+    assert.equal(pressed(), "true", "and reading the tooltip never toggled anything");
+  });
+
+  it("unbinds every target it bound when the button is detached", () => {
+    shutdown();
+    installFakeZotero();
+    startup({ id: "toggle-test", version: "0.5.0" });
+    const reader = fakeReader("multi-detach");
+    ctx = render({ reader });
+    const first = ctx;
+    const listSizes = () =>
+      targets().flatMap((node) =>
+        ["pointerdown", "pointerup", "click", "pointerover"].map((type) => (node.listeners.get(type) ?? []).length),
+      );
+    assert.deepEqual(listSizes(), new Array(12).fill(1), "twelve capture bindings on the three objects of this realm");
+
+    // The next render hands us a fresh toolbar realm, so nothing of the old one
+    // should still carry a listener of ours.
+    const second = render({ reader });
+
+    assert.deepEqual(listSizes(), new Array(12).fill(0), "detach emptied the document, its window and the old node");
+    assert.deepEqual(
+      targets().map((node) => node.unbound.length),
+      [4, 4, 4],
+      "and unbound exactly the four it held on each object",
+    );
+    assert.equal(first.button.parentNode, null, "the old node is out of its toolbar");
+
+    ctx = second;
+    assert.deepEqual(listSizes(), new Array(12).fill(1), "the new button bound its own twelve, on the new realm");
   });
 });
 

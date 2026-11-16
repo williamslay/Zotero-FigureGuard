@@ -106,7 +106,7 @@ const TOGGLE_CSS = `
 let regionCache = null;
 /** @type {Map<object, {session: ReaderSession, startPromise: Promise<any>|null, closeWatch: object|null}>} */
 const sessions = new Map();
-/** @type {Map<ReaderSession, {button: object, session: ReaderSession, doc: object, onPointerDown: (event: object) => void, onClick: (event: object) => void, off: () => void}>} The toolbar button currently mounted per session, with the document its activation listeners are bound to. */
+/** @type {Map<ReaderSession, {button: object, session: ReaderSession, bindings: Array<{target: object, type: string, handler: (event: object) => void}>, off: () => void, paint: () => void}>} The toolbar button currently mounted per session, with every activation listener bound for it and the object each was bound to. */
 const buttonLinks = new Map();
 /** @type {Array<object|null>} Registered window observers. */
 const observers = [];
@@ -259,10 +259,11 @@ function pressInsideBox(node, event) {
 }
 
 /**
- * Removes the session's current button from the toolbar: both delegated
- * activation listeners are unbound from the toolbar document, the node is taken
- * out of its parent, and the state listener is dropped, so repeated toolbar
- * renders do not pile up detached buttons and listeners.
+ * Removes the session's current button from the toolbar: every activation
+ * listener is unbound from every object it was bound to — the toolbar document,
+ * its window, the node's own document and the node — the node is taken out of
+ * its parent, and the state listener is dropped, so repeated toolbar renders do
+ * not pile up detached buttons and listeners.
  *
  * @param {ReaderSession} session
  * @returns {boolean} Whether a button was detached.
@@ -271,15 +272,14 @@ function detachButton(session) {
   const link = buttonLinks.get(session);
   if (!link) return false;
   buttonLinks.delete(session);
-  try {
-    link.doc.removeEventListener("pointerdown", link.onPointerDown, true);
-  } catch (ignored) {
-    // The toolbar document may already be gone.
-  }
-  try {
-    link.doc.removeEventListener("click", link.onClick, true);
-  } catch (ignored) {
-    // Same document, already gone either way.
+  // Every diagnostic listener this button bound, one removal per binding, so a
+  // target that is already gone cannot strand the removals after it.
+  for (const binding of link.bindings ?? []) {
+    try {
+      binding.target.removeEventListener(binding.type, binding.handler, true);
+    } catch (ignored) {
+      // That target is already gone; the next render binds its own set.
+    }
   }
   try {
     const parent = link.button.parentNode;
@@ -349,13 +349,19 @@ function createButton(doc, session) {
       // A button that cannot restyle itself is still functional.
     }
   };
-  // Activation is delegated to the toolbar document instead of the node, in the
-  // capture phase, because the Zotero toolbar is a React tree: a press that
-  // first focuses the window can re-render the toolbar and replace the node we
-  // appended, and then the event is delivered to nodes we never hold. Each
-  // document listener hit-tests the press coordinates against the node we hold
-  // and against any re-rendered stand-in carrying our class, so one press
-  // reaches the session however the toolbar rebuilt itself underneath it.
+  // Activation is delegated away from the node, in the capture phase, because
+  // the Zotero toolbar is a React tree: a press that first focuses the window
+  // can re-render the toolbar and replace the node we appended, and then the
+  // event is delivered to nodes we never hold. The real-machine counters showed
+  // a press that never reached the document `renderToolbar` hands us either, so
+  // the same handlers are bound to every object the press might flow through:
+  // that document, its window, the document the node reports as its own, and
+  // the node itself. Each listener hit-tests the press coordinates against the
+  // node we hold and, while our own node is out of the document, against a
+  // re-rendered stand-in carrying our class, so one press reaches the session
+  // however the toolbar rebuilt itself underneath it. One body acts on an event
+  // object at most once, so the outermost target that sees the press toggles and
+  // the inner ones only report that they saw it.
   // Pointer presses act on pointerdown, immediately and with no
   // preventDefault, so the browser keeps its normal focus behaviour; the click
   // listener exists only for the keyboard, whose click carries detail === 0,
@@ -364,13 +370,27 @@ function createButton(doc, session) {
   // on its own.
   //
   // TEMPORARY real-machine diagnostic, kept while the toolbar double-click
-  // report is open: a first press that leaves `d` at 0 never reached this
-  // document, and a first press that raises `d` but not `p` landed outside the
-  // toggle's box. Delete this block once the fix is verified on a real machine.
-  const seen = { press: 0, click: 0, doc: 0, toggle: 0 };
+  // report is open, and the only reason the binding below is deliberately
+  // duplicated across targets. `P`, `C` and `T` are what this button accepted
+  // and what it really toggled. `D`, `W`, `O` and `B` count every pointerdown
+  // the document, the window, the node's own document and the node itself saw,
+  // before any other check, so whichever one rises names the object the press
+  // flowed through. `U` counts pointerup once per event object, which exposes a
+  // Windows activation press whose pointerdown was swallowed while its
+  // pointerup arrived. A first press that raises none of `D W O B` never reached
+  // any object this button bound to. Delete this block, the raw counters and the
+  // multi-target binding once the fix is verified on a real machine.
+  const seen = { P: 0, T: 0, C: 0, D: 0, W: 0, O: 0, B: 0, U: 0 };
+  /** Event objects this button already acted on: several targets, one toggle. */
+  const acted = new WeakSet();
+  /** Pointerup events already counted: several targets, one `U`. */
+  const countedUp = new WeakSet();
   const paintSeen = () => {
     try {
-      button.title = `${BUTTON_TITLE} p${seen.press} c${seen.click} d${seen.doc} t${seen.toggle}`;
+      const rect = button.getBoundingClientRect?.();
+      const rw = rect ? Math.round(rect.width) || 0 : 0;
+      const rh = rect ? Math.round(rect.height) || 0 : 0;
+      button.title = `${BUTTON_TITLE} p${seen.P} t${seen.T} c${seen.C} D${seen.D} W${seen.W} O${seen.O} B${seen.B} U${seen.U} a${button.isConnected ? 1 : 0} ${rw}x${rh}`;
     } catch (ignored) {
       // A tooltip that cannot be rewritten still leaves the counters correct.
     }
@@ -398,11 +418,12 @@ function createButton(doc, session) {
 
   const onPointerDown = (event) => {
     try {
-      seen.doc += 1;
       if (event?.button !== 0) return;
+      if (acted.has(event)) return;
       if (!hitToggle(event)) return;
-      seen.press += 1;
-      seen.toggle += 1;
+      acted.add(event);
+      seen.P += 1;
+      seen.T += 1;
       session.toggle();
     } catch (err) {
       warnOnce("button-press", err);
@@ -413,9 +434,11 @@ function createButton(doc, session) {
   const onClick = (event) => {
     try {
       if (event?.detail !== 0) return;
+      if (acted.has(event)) return;
       if (!hitToggle(event)) return;
-      seen.click += 1;
-      seen.toggle += 1;
+      acted.add(event);
+      seen.C += 1;
+      seen.T += 1;
       session.toggle();
     } catch (err) {
       warnOnce("button-click", err);
@@ -423,12 +446,70 @@ function createButton(doc, session) {
       paintSeen();
     }
   };
+  const onPointerUp = (event) => {
+    try {
+      if (event && !countedUp.has(event)) {
+        countedUp.add(event);
+        seen.U += 1;
+      }
+    } finally {
+      paintSeen();
+    }
+  };
+  // The tooltip is what carries this diagnostic, and a tooltip reads the title at
+  // the moment the pointer arrives. Repainting on the pointer entering any bound
+  // object means the reported attachment flag and box describe the node as it is
+  // when it is being looked at, not as it was at the last press.
+  const onHover = () => paintSeen();
 
-  doc.addEventListener("pointerdown", onPointerDown, true);
-  doc.addEventListener("click", onClick, true);
+  /**
+   * Every object a press could flow through, each tagged with the raw counter
+   * that proves it saw the press. The list order is only the order they are
+   * bound in: the capture phase itself always reaches the window first. Two
+   * roles often resolve to the same object — `button.ownerDocument` normally is
+   * `doc` — and a repeated object is bound once, under the first role.
+   *
+   * @type {Array<{target: object, raw: string}>}
+   */
+  const targets = [];
+  const addTarget = (target, raw) => {
+    if (!target) return;
+    if (targets.some((entry) => entry.target === target)) return;
+    targets.push({ target, raw });
+  };
+  addTarget(doc, "D");
+  addTarget(doc?.defaultView ?? null, "W");
+  addTarget(button.ownerDocument ?? null, "O");
+  addTarget(button, "B");
+
+  /** @type {Array<{target: object, type: string, handler: (event: object) => void}>} Every listener this render bound, so detach unwinds exactly this set. */
+  const bindings = [];
+  for (const { target, raw } of targets) {
+    if (typeof target.addEventListener !== "function") continue;
+    // Only the press body needs its own wrapper, because the raw counter has to
+    // say which object saw the press; the keyboard and pointerup bodies are
+    // shared and settle the duplicates themselves.
+    const pointerDown = (event) => {
+      seen[raw] += 1;
+      onPointerDown(event);
+    };
+    const bind = (type, handler) => {
+      try {
+        target.addEventListener(type, handler, true);
+        bindings.push({ target, type, handler });
+      } catch (ignored) {
+        // A target that refuses one listener still reports the other two.
+      }
+    };
+    bind("pointerdown", pointerDown);
+    bind("pointerup", onPointerUp);
+    bind("click", onClick);
+    bind("pointerover", onHover);
+  }
+
   const off = session.addListener(applyState);
   applyState();
-  buttonLinks.set(session, { button, session, doc, onPointerDown, onClick, off });
+  buttonLinks.set(session, { button, session, bindings, off, paint: paintSeen });
   return button;
 }
 
@@ -619,6 +700,15 @@ function onRenderToolbar(event) {
     if (!doc?.createElement) return;
     const button = createButton(doc, session);
     event.append(button);
+    // The counters are painted while the node has no place in the toolbar yet, so
+    // the tooltip of a button nobody has pressed would report a node that is
+    // neither attached nor sized. Repainting once the append returned keeps that
+    // temporary read-out honest: it describes the node as the toolbar has it.
+    try {
+      buttonLinks.get(session)?.paint?.();
+    } catch (ignored) {
+      // A tooltip that cannot be refreshed still leaves the counters correct.
+    }
   } catch (err) {
     warnOnce("render-toolbar", err);
   }

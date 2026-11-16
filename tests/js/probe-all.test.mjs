@@ -141,16 +141,20 @@ function fakeOverlay(pageNumber) {
 
 /** A minimal toolbar-document stand-in. */
 function fakeDoc() {
-  return {
-    addEventListener() {},
-    removeEventListener() {},
+  /** A binding target that takes the toggle's listeners and ignores them. */
+  const target = () => ({ addEventListener() {}, removeEventListener() {} });
+  const doc = {
+    ...target(),
+    // The toggle binds this window too; the probe only needs it to be there.
+    defaultView: target(),
     createElement: () => ({
       style: {},
       setAttribute() {},
-      addEventListener() {},
-      removeEventListener() {},
+      ...target(),
+      getBoundingClientRect: () => null,
     }),
   };
+  return doc;
 }
 
 /**

@@ -31,11 +31,11 @@ Zotero Figure Guard 是 Zotero 7–10 的 PDF 阅读器扩展。深色主题下�
 
 ## 两级测试
 
-- `npm run test:ci` — 公开 CI 级，不需要受版权保护的 PDF。只跑不碰真实 PDF 的测试文件（当前 17 个文件、400 个用例），全部实际执行并通过，结果里 `cancelled` 必须为 0。GitHub Actions 的 CI 就是这一级。
+- `npm run test:ci` — 公开 CI 级，不需要受版权保护的 PDF。只跑不碰真实 PDF 的测试文件（当前 17 个文件、405 个用例），全部实际执行并通过，结果里 `cancelled` 必须为 0。GitHub Actions 的 CI 就是这一级。
 - `npm test`（等价于 `npm run test:fixture`）— 维护者本地的完整回归级。检测层的回归基线取自 5 篇论文的 PDF，这些 PDF 受版权保护、不随仓库分发，需要自行放到 README「运行测试」一节列出的路径。缺少这些 PDF 时，被依赖真实 PDF 的用例会取消（cancelled）而不是通过，所以完整回归只在维护者本地跑，不作为公开 CI 的强制门槛。
 
 发布步骤与失败处理见 [docs/RELEASING.md](./docs/RELEASING.md)。
 
 ## 已知问题
 
-- 阅读器工具栏的「原色」开关在真机上仍需快速连点两下才生效，第一次单击既不改图表颜色也不改按钮样式。已排除：事件绑定方式（改绑 `pointerdown` 后症状不变）、覆盖层拦截（覆盖层为 `pointer-events: none`）、图标本身（开关已是纯文字）。剩余嫌疑是首次按下落在工具栏重建后废弃的按钮节点上，或切换到了另一个阅读器 session 而没有重绘。下一轮开发用按钮 tooltip 上的事件计数（p/c/d/t）定位首次按下的去向，再决定修法。`dev` 上已把激活改成工具栏文档级捕获（tooltip 带临时计数 `p/c/d/t`），待真机确认单击生效后移除本条与计数。
+- 阅读器工具栏的「原色」开关在真机上仍需快速连点两下才生效，第一次单击既不改图表颜色也不改按钮样式。已排除：事件绑定方式（改绑 `pointerdown` 后症状不变）、覆盖层拦截（覆盖层为 `pointer-events: none`）、图标本身（开关已是纯文字）。`dev` 上把激活改成工具栏文档级捕获后，真机 tooltip 的 document 计数仍为 0，说明按下没有经过 `renderToolbar` 交给我们的那个 document，因此改为同一处理函数同时捕获绑定到四个候选目标（该 document、它的 `defaultView`、按钮的 `ownerDocument`、按钮本身），一次按下只动作一次。tooltip 现带临时读数 `p# t# c# D# W# O# B# U# a# 宽x高`：`D/W/O/B` 各自统计该目标看到的 pointerdown，`U` 统计去重后的 pointerup（用于识别 Windows 抢焦点吞掉首击），`a` 与宽高是我们的节点是否挂在文档里及其盒尺寸。按读数决定最终修法，之后移除本条与全部临时计数。
