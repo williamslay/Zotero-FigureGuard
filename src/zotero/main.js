@@ -278,9 +278,10 @@ function pressInsideBox(node, event) {
 /**
  * Removes the session's current button from the toolbar: every activation
  * listener is unbound from every object it was bound to — the toolbar document,
- * its window, the node's own document and the node — the node is taken out of
- * its parent, and the state listener is dropped, so repeated toolbar renders do
- * not pile up detached buttons and listeners.
+ * its window, the node, the main-window document and, once it was bound, the
+ * reader's inner document — the node is taken out of its parent, and the state
+ * listener is dropped, so repeated toolbar renders do not pile up detached
+ * buttons and listeners.
  *
  * @param {ReaderSession} session
  * @returns {boolean} Whether a button was detached.
@@ -376,8 +377,9 @@ function createButton(doc, session) {
   // event is delivered to nodes we never hold. The real-machine counters showed
   // a press that never reached the document `renderToolbar` hands us either, so
   // the same handlers are bound to every object the press might flow through:
-  // that document, its window, the document the node reports as its own, and
-  // the node itself. Each listener hit-tests the press coordinates against the
+  // that document, its window, the node itself, the main-window document and,
+  // once the session has one, the reader's inner document. Each listener
+  // hit-tests the press coordinates against the
   // node we hold and, while our own node is out of the document, against a
   // re-rendered stand-in carrying our class, so one press reaches the session
   // however the toolbar rebuilt itself underneath it. One body acts on an event
@@ -393,20 +395,76 @@ function createButton(doc, session) {
   // TEMPORARY real-machine diagnostic, kept while the single-click report is open,
   // and the only reason the binding below is deliberately duplicated across
   // targets. `P`, `C` and `T` are what this button accepted and what it really
-  // toggled. `D`, `W`, `O` and `B` count every pointerdown the document, the
-  // window, the node's own document and the node itself saw, before any other
-  // check, so whichever one rises names the object the press flowed through. `U`
+  // toggled. `D`, `W`, `B`, `M` and `I` count every pointerdown the toolbar
+  // document, its window, the node, the main-window document and the reader's
+  // inner document saw, before any other check, so whichever one rises names the
+  // object the press flowed through; a role whose target is the same object as
+  // an earlier role is bound once, under the earlier role, and never counts. `U`
   // counts pointerup once per event object, which exposes a Windows activation
-  // press whose pointerdown was swallowed while its pointerup arrived. A press
-  // that raises none of `D W O B` never reached any object this button bound to,
-  // which is what a native tooltip dismissing on top of the chip would look like.
-  // Delete this block, the raw counters and the multi-target binding once the fix
+  // press whose pointerdown was swallowed while its pointerup arrived. `@` and
+  // `x=` report the rounded client coordinates and the target of the last
+  // pointerdown any bound object saw, even one the hit test rejected, and `LT`
+  // the rounded top-left of our own box, so a press aimed at another document
+  // lying over the toolbar can be placed. A press that raises none of
+  // `D W B M I` never reached any object this button bound to. Delete this
+  // block, the raw counters and the multi-target binding once the fix
   // is verified on a real machine.
-  const seen = { P: 0, T: 0, C: 0, D: 0, W: 0, O: 0, B: 0, U: 0 };
+  const seen = { P: 0, T: 0, C: 0, D: 0, W: 0, B: 0, M: 0, I: 0, U: 0 };
   /** Event objects this button already acted on: several targets, one toggle. */
   const acted = new WeakSet();
   /** Pointerup events already counted: several targets, one `U`. */
   const countedUp = new WeakSet();
+  /**
+   * The last pointerdown any bound object saw, even one the hit test rejected:
+   * its rounded client coordinates and a short description of its target. Both
+   * stay null until such an event arrives, which the read-out renders as the
+   * `@-,-` and `x=?` placeholders.
+   * @type {{x: number|null, y: number|null, desc: string|null}}
+   */
+  const lastDown = { x: null, y: null, desc: null };
+
+  /**
+   * A short, space-free label for the target of a recorded press: the tag name,
+   * plus `#id` when it has one, plus the first class, the whole truncated to
+   * 24 characters. `?` when the event carries no describable target.
+   *
+   * @param {object} event
+   * @returns {string}
+   */
+  const describeTarget = (event) => {
+    try {
+      const node = event?.target;
+      const tag = typeof node?.tagName === "string" ? node.tagName : "";
+      if (!tag) return "?";
+      let text = tag;
+      if (node.id) text += `#${node.id}`;
+      const classes = typeof node.className === "string" ? node.className.trim().split(/\s+/) : [];
+      if (classes[0]) text += `.${classes[0]}`;
+      return text.slice(0, 24);
+    } catch (ignored) {
+      return "?";
+    }
+  };
+
+  /**
+   * Notes the coordinates and the target of one pointerdown sighting, before
+   * the hit test can reject it, so the read-out can say where the pointer
+   * really went. An event without usable coordinates is not recorded.
+   *
+   * @param {object} event
+   */
+  const recordDown = (event) => {
+    try {
+      const x = Math.round(Number(event?.clientX));
+      const y = Math.round(Number(event?.clientY));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      lastDown.x = x;
+      lastDown.y = y;
+      lastDown.desc = describeTarget(event);
+    } catch (ignored) {
+      // A read-out that cannot be filled in still leaves the counters correct.
+    }
+  };
   /**
    * The chip's own counter line, so the read-out is visible without hovering and
    * no native tooltip window sits between the pointer and this document. Null when
@@ -426,7 +484,10 @@ function createButton(doc, session) {
       const rect = button.getBoundingClientRect?.();
       const rw = rect ? Math.round(rect.width) || 0 : 0;
       const rh = rect ? Math.round(rect.height) || 0 : 0;
-      const text = `p${seen.P} t${seen.T} c${seen.C} D${seen.D} W${seen.W} O${seen.O} B${seen.B} U${seen.U} a${button.isConnected ? 1 : 0} ${rw}x${rh}`;
+      const at = lastDown.x === null ? "@-,-" : `@${lastDown.x},${lastDown.y}`;
+      const what = `x=${lastDown.desc ?? "?"}`;
+      const lt = rect ? `LT=${Math.round(rect.left)}x${Math.round(rect.top)}` : "LT=?x?";
+      const text = `p${seen.P} t${seen.T} c${seen.C} D${seen.D} W${seen.W} B${seen.B} M${seen.M} I${seen.I} U${seen.U} a${button.isConnected ? 1 : 0} ${rw}x${rh} ${at} ${what} ${lt}`;
       if (counter) counter.textContent = text;
       else button.title = text;
     } catch (ignored) {
@@ -497,15 +558,51 @@ function createButton(doc, session) {
   // The read-out is inline now, but a hover still refreshes it: repainting when the
   // pointer enters any bound object means the reported attachment flag and box
   // describe the node as it is when it is being looked at, not as it was at the
-  // last press.
-  const onHover = () => paintSeen();
+  // last press. The hover is also the moment the reader's inner document gets its
+  // late binding, when the session had not resolved one yet at render time.
+  const onHover = () => {
+    bindInnerDocument();
+    paintSeen();
+  };
+
+  /**
+   * The document of the main browser window, when Zotero will say. A press aimed
+   * at the toolbar area may belong to that document rather than to the one
+   * `renderToolbar` handed us.
+   *
+   * @returns {object|null}
+   */
+  const mainWindowDocument = () => {
+    try {
+      return getZotero()?.getMainWindow?.()?.document ?? null;
+    } catch (ignored) {
+      return null;
+    }
+  };
+
+  /**
+   * The reader's inner document, when the session has resolved one. At toolbar
+   * render time the session may still be starting, so this can be null and the
+   * first hover re-tries; the reader iframe painting over the toolbar area is
+   * the other candidate for the swallowed press.
+   *
+   * @returns {object|null}
+   */
+  const innerDocument = () => {
+    try {
+      return session.innerWin?.document ?? null;
+    } catch (ignored) {
+      return null;
+    }
+  };
 
   /**
    * Every object a press could flow through, each tagged with the raw counter
    * that proves it saw the press. The list order is only the order they are
    * bound in: the capture phase itself always reaches the window first. Two
-   * roles often resolve to the same object — `button.ownerDocument` normally is
-   * `doc` — and a repeated object is bound once, under the first role.
+   * roles resolve to the same object all the time — the main-window document
+   * usually is the toolbar document — and a repeated object is bound once,
+   * under the first role, so the later role's letter never moves.
    *
    * @type {Array<{target: object, raw: string}>}
    */
@@ -517,18 +614,22 @@ function createButton(doc, session) {
   };
   addTarget(doc, "D");
   addTarget(doc?.defaultView ?? null, "W");
-  addTarget(button.ownerDocument ?? null, "O");
   addTarget(button, "B");
+  addTarget(mainWindowDocument(), "M");
+  const innerAtRender = innerDocument();
+  addTarget(innerAtRender, "I");
 
-  /** @type {Array<{target: object, type: string, handler: (event: object) => void}>} Every listener this render bound, so detach unwinds exactly this set. */
+  /** @type {Array<{target: object, type: string, handler: (event: object) => void}>} Every listener this render bound, late-bound targets included, so detach unwinds exactly this set. */
   const bindings = [];
-  for (const { target, raw } of targets) {
-    if (typeof target.addEventListener !== "function") continue;
+  const bindTarget = (target, raw) => {
+    if (typeof target.addEventListener !== "function") return;
     // Only the press body needs its own wrapper, because the raw counter has to
-    // say which object saw the press; the keyboard and pointerup bodies are
-    // shared and settle the duplicates themselves.
+    // say which object saw the press and the last-press read-out has to record
+    // the sighting before the hit test can reject it; the keyboard and pointerup
+    // bodies are shared and settle the duplicates themselves.
     const pointerDown = (event) => {
       seen[raw] += 1;
+      recordDown(event);
       onPointerDown(event);
     };
     const bind = (type, handler) => {
@@ -543,7 +644,20 @@ function createButton(doc, session) {
     bind("pointerup", onPointerUp);
     bind("click", onClick);
     bind("pointerover", onHover);
-  }
+  };
+  for (const { target, raw } of targets) bindTarget(target, raw);
+
+  /** Whether the inner document settled its own binding: null at render time, the first hover re-tries. */
+  let innerBound = Boolean(innerAtRender);
+  const bindInnerDocument = () => {
+    if (innerBound) return;
+    const inner = innerDocument();
+    if (!inner) return;
+    innerBound = true;
+    if (targets.some((entry) => entry.target === inner)) return;
+    targets.push({ target: inner, raw: "I" });
+    bindTarget(inner, "I");
+  };
 
   const off = session.addListener(applyState);
   applyState();

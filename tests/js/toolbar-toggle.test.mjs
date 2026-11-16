@@ -29,12 +29,19 @@ const ICON_ENTRY = "content/figureguard-icon.svg";
 /** Handlers the fake `Zotero.Reader` recorded, keyed by event type. */
 const handlers = new Map();
 
-/** A `Zotero` global with just the reader event registration main.js uses. */
-function installFakeZotero() {
+/**
+ * A `Zotero` global with just the reader event registration main.js uses.
+ * `mainWindow` is the stand-in `getMainWindow()` hands back: a window with its
+ * own document, which the toggle binds as the `M` target. Null keeps the old
+ * shape where there is no main window to bind.
+ *
+ * @param {{mainWindow?: object|null}} [options]
+ */
+function installFakeZotero({ mainWindow = null } = {}) {
   globalThis.Zotero = {
     debug() {},
     getMainWindow() {
-      return null;
+      return mainWindow;
     },
     getMainWindows() {
       return [];
@@ -210,8 +217,13 @@ function counterText(button) {
   return String(span?.textContent ?? button?.title ?? "");
 }
 
-/** The counter pattern, without the tooltip's leading name. */
-const COUNTERS = /^p(\d+) t(\d+) c(\d+) D(\d+) W(\d+) O(\d+) B(\d+) U(\d+) a([01]) (\d+)x(\d+)$/;
+/**
+ * The counter pattern, without the tooltip's leading name. The tail carries the
+ * last pointerdown sighting: `@x,y`, the target description `x=`, and the
+ * rounded top-left of our own box `LT=`.
+ */
+const COUNTERS =
+  /^p(\d+) t(\d+) c(\d+) D(\d+) W(\d+) B(\d+) M(\d+) I(\d+) U(\d+) a([01]) (\d+)x(\d+) @(-?\d+|-),(-?\d+|-) x=(\S+) LT=(-?\d+|\?)x(-?\d+|\?)$/;
 
 installFakeZotero();
 
@@ -238,8 +250,8 @@ describe("toolbar toggle: the text button it builds", () => {
     );
     assert.match(
       counterText(button),
-      /^p0 t0 c0 D0 W0 O0 B0 U0 a1 0x0$/,
-      "the read-out starts every temporary counter at zero and reports the node the toolbar has just attached",
+      /^p0 t0 c0 D0 W0 B0 M0 I0 U0 a1 0x0 @-,- x=\? LT=0x0$/,
+      "the read-out starts every temporary counter at zero, has seen no pointerdown yet, and reports the node the toolbar has just attached",
     );
     assert.equal(button.type, "button", "a plain button, never a form submit");
     assert.equal(button.className, "fg-toggle", "the class name keeps the fg- prefix");
@@ -488,11 +500,11 @@ describe("toolbar toggle: one press, every target, one action", () => {
     fireAll(ctx, "pointerdown", { button: 0, clientX: BOX.left + 5, clientY: BOX.top + 5, target: ctx.button });
 
     assert.equal(pressed(), "false", "the press toggled");
-    const [P, T, C, D, W, O, B] = counts();
+    const [P, T, C, D, W, B, M] = counts();
     assert.equal(P, 1, "one accepted press, not three");
     assert.equal(T, 1, "exactly one session.toggle call for three sightings");
     assert.deepEqual([D, W, B], [1, 1, 1], "and each of the three objects says it saw the press");
-    assert.equal(O, 0, "the node's own document is the toolbar document, so it is not counted twice");
+    assert.equal(M, 0, "this fixture has no main-window document, so the M target is not bound");
     assert.equal(C, 0, "a pointer press never counts as a keyboard click");
   });
 
@@ -515,7 +527,7 @@ describe("toolbar toggle: one press, every target, one action", () => {
     fireAll(ctx, "pointerup", { button: 0, clientX: BOX.left + 5, clientY: BOX.top + 5, target: ctx.button });
 
     assert.equal(pressed(), "true", "a lone pointerup must not toggle the session");
-    const [P, T, , , , , B, U] = counts();
+    const [P, T, , , , B, , , U] = counts();
     assert.equal(U, 1, "the release counted once, though three objects saw it");
     assert.deepEqual([P, T, B], [0, 0, 0], "and it moved no press counter at all");
   });
@@ -524,13 +536,13 @@ describe("toolbar toggle: one press, every target, one action", () => {
     mount(60.4, 24.6);
     // Any event repaints the tooltip, so the state is read after one.
     fireAll(ctx, "pointerup", { button: 0, clientX: BOX.left + 5, clientY: BOX.top + 5, target: ctx.button });
-    assert.equal(counts()[8], 1, "our node is in the toolbar, so a is 1");
-    assert.equal(counts()[9], 60, "the reported width is the rounded rect width");
-    assert.equal(counts()[10], 25, "and the reported height is the rounded rect height");
+    assert.equal(counts()[9], 1, "our node is in the toolbar, so a is 1");
+    assert.equal(counts()[10], 60, "the reported width is the rounded rect width");
+    assert.equal(counts()[11], 25, "and the reported height is the rounded rect height");
 
     ctx.container.removeChild(ctx.button);
     fireAll(ctx, "pointerup", { button: 0, clientX: BOX.left + 5, clientY: BOX.top + 5, target: ctx.button });
-    assert.equal(counts()[8], 0, "the tooltip says so as soon as the node is out of the document");
+    assert.equal(counts()[9], 0, "the tooltip says so as soon as the node is out of the document");
     assert.equal(pressed(), "true", "and reading the tooltip never toggled anything");
   });
 
@@ -561,6 +573,126 @@ describe("toolbar toggle: one press, every target, one action", () => {
 
     ctx = second;
     assert.deepEqual(listSizes(), new Array(12).fill(1), "the new button bound its own twelve, on the new realm");
+  });
+});
+
+describe("toolbar toggle: the main-window and inner-document targets", () => {
+  /** One render, plus the main-window document the fake Zotero reports. */
+  let ctx = null;
+  const BOX = { left: 100, top: 20, width: 60, height: 24 };
+  const pressed = () => ctx.button.attributes.get("aria-pressed");
+  /** The read-out fields as strings: counters, box, then the last-press tail. */
+  const fields = () => {
+    const text = counterText(ctx.button);
+    const parts = text.match(COUNTERS);
+    assert.ok(parts, `the chip carries every counter: ${text}`);
+    return parts.slice(1);
+  };
+
+  /** Fresh plugin whose main window owns a document distinct from the toolbar's. */
+  const mount = (options = {}) => {
+    shutdown();
+    const mainDoc = fakeDoc();
+    installFakeZotero({ mainWindow: { document: mainDoc } });
+    startup({ id: "toggle-test", version: "0.5.0" });
+    ctx = render(options);
+    ctx.mainDoc = mainDoc;
+    place(ctx.button, BOX.left, BOX.top, BOX.width, BOX.height);
+  };
+
+  it("toggles once for a press inside the box that only the main-window document sees", () => {
+    mount();
+    const bound = (node, type) => (node.listeners.get(type) ?? []).filter((entry) => entry.capture).length;
+    assert.equal(bound(ctx.mainDoc, "pointerdown"), 1, "the main-window document carries its own capture binding");
+
+    fire(ctx.mainDoc, "pointerdown", {
+      button: 0,
+      clientX: BOX.left + 5,
+      clientY: BOX.top + 5,
+      target: ctx.button,
+    });
+
+    assert.equal(pressed(), "false", "the press reached the session through the main-window document");
+    const [P, T, C, D, W, B, M] = fields().map(Number);
+    assert.deepEqual([P, T, C, D, W, B, M], [1, 1, 0, 0, 0, 0, 1], "one accepted press, one toggle, and M says the main window saw it");
+    assert.equal(P + C, T, "the p + c === t invariant holds across the new target");
+  });
+
+  it("counts a main-window press outside the box without toggling, and records it", () => {
+    mount();
+    const outside = ctx.mainDoc.createElement("div");
+    outside.id = "tb";
+    outside.className = "btn";
+    fire(ctx.mainDoc, "pointerdown", {
+      button: 0,
+      clientX: BOX.left - 30,
+      clientY: BOX.top + 101,
+      target: outside,
+    });
+    console.log(`sample read-out: ${counterText(ctx.button)}`);
+
+    assert.equal(pressed(), "true", "a press outside our box reaches no session");
+    const [P, T, , D, , , M, , , , , , atX, atY, xDesc] = fields();
+    assert.equal(T, "0", "the miss toggled nothing");
+    assert.deepEqual([P, D].map(Number), [0, 0], "and it was accepted nowhere");
+    assert.equal(M, "1", "but the main-window document still counted the sighting");
+    assert.equal(atX, String(BOX.left - 30), "the @ field carries the rejected press's x, though the hit test refused it");
+    assert.equal(atY, String(BOX.top + 101), "and its y");
+    assert.equal(xDesc, "div#tb.btn", "x= names the tag as the realm reports it, the id and the first class");
+    assert.ok(xDesc.length <= 24, "the description stays inside its 24-character budget");
+  });
+
+  it("binds the main-window document once when it is the toolbar document", () => {
+    shutdown();
+    const doc = fakeDoc();
+    installFakeZotero({ mainWindow: { document: doc } });
+    startup({ id: "toggle-test", version: "0.5.0" });
+    ctx = render({ doc });
+    place(ctx.button, BOX.left, BOX.top, BOX.width, BOX.height);
+
+    for (const type of ["pointerdown", "pointerup", "click", "pointerover"]) {
+      assert.equal((doc.listeners.get(type) ?? []).length, 1, `the shared object keeps the single ${type} binding it got as the toolbar document`);
+    }
+    fire(doc, "pointerdown", { button: 0, clientX: BOX.left + 5, clientY: BOX.top + 5, target: ctx.button });
+    assert.equal(pressed(), "false", "the press acts once through the shared document");
+    const [P, T, , D, , , M] = fields().map(Number);
+    assert.deepEqual([P, T, D, M], [1, 1, 1, 0], "the sighting counts under the first role, and M never moves");
+  });
+
+  it("late-binds the inner document on hover and unbinds every target on detach", () => {
+    mount({ reader: fakeReader("realm-detach") });
+    const innerWin = { document: fakeDoc() };
+    const session = getSessions()[getSessions().length - 1];
+    session.innerWin = innerWin;
+
+    // The inner document was null at render time, so the first hover binds it,
+    // and a press that only it sees reaches the session through the I letter.
+    fire(ctx.doc, "pointerover", { button: 0 });
+    const innerBound = (node, type) => (node.listeners.get(type) ?? []).filter((entry) => entry.capture).length;
+    assert.equal(innerBound(innerWin.document, "pointerdown"), 1, "the hover bound the press path to the reader's inner document");
+    fire(innerWin.document, "pointerdown", { button: 0, clientX: BOX.left + 5, clientY: BOX.top + 5, target: ctx.button });
+    assert.equal(pressed(), "false", "the inner document is a live activation path");
+    const [P, , , , , , , I] = fields().map(Number);
+    assert.deepEqual([P, I], [1, 1], "the accepted press counts once, under I");
+
+    // Shutdown detaches the button: every target this render bound, the two new
+    // roles included, ends with nothing of ours left on it.
+    shutdown();
+    for (const node of [ctx.doc, ctx.doc.defaultView, ctx.button, ctx.mainDoc, innerWin.document]) {
+      for (const type of ["pointerdown", "pointerup", "click", "pointerover"]) {
+        assert.deepEqual(node.listeners.get(type) ?? [], [], `no ${type} handler is left on ${node.tagName}`);
+      }
+      assert.deepEqual(
+        node.unbound,
+        [
+          { type: "pointerdown", capture: true },
+          { type: "pointerup", capture: true },
+          { type: "click", capture: true },
+          { type: "pointerover", capture: true },
+        ],
+        `detach unbound exactly the four it held on ${node.tagName}, and only the capture bindings match`,
+      );
+    }
   });
 });
 
