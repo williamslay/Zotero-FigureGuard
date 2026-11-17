@@ -737,14 +737,31 @@ export class ReaderSession {
      * @type {boolean}
      */
     this.paintOnSelectPending = false;
+    /** Incremented when a repaint sweep starts or pauses so stale loops stop cleanly. */
+    this.paintEpoch = 0;
+    /** True when work was deferred or paused while the tab was in the background. */
+    this.workPausedInBackground = false;
 
     // Arrow handlers so the event bus can keep its own references.
     this.onDocumentEvent = () => this.queueDocumentCheck();
     this.onPageRenderedEvent = (event) => {
       try {
+        if (this.destroyed || !this.enabled) return;
+        if (!this.isForeground()) {
+          this.workPausedInBackground = true;
+          this.paintOnSelectPending = true;
+          return;
+        }
+        const wasPaused = this.workPausedInBackground || this.paintOnSelectPending;
+        if (wasPaused) {
+          this.workPausedInBackground = false;
+          this.paintOnSelectPending = false;
+          this.ensureCurrentDocument("pagerendered");
+        }
         const pageNumber = Number(event?.pageNumber ?? event?.pageView?.id ?? 0);
         if (!pageNumber) return;
         const job = this.attachPageNumber(pageNumber);
+        if (wasPaused) void this.repaintAttached();
         if (!job) return;
         // A page painted while the viewer is still loading is painted against a
         // viewport the page replaces a moment later, and the page-at-a-time route
@@ -782,6 +799,7 @@ export class ReaderSession {
    */
   async start() {
     if (this.destroyed) return false;
+    this.bindOuterVisibility();
     // The pdf.js iframe is mounted a tick after `reader-opened`, so resolution
     // must poll instead of giving up on the first miss.
     const ready = await this.waitUntilReady();
@@ -804,6 +822,11 @@ export class ReaderSession {
     // A document without an event bus paints once but never learns about a
     // reload, so keep watching for the bus in the background.
     if (!this.eventBus) this.startRecovery();
+    if (!this.isForeground()) {
+      this.workPausedInBackground = true;
+      this.paintOnSelectPending = true;
+      return true;
+    }
     await this.repaintAttached();
     // The first-open case on the real machine: this pass paints nothing because
     // the pages are not built yet, and with no event bus there was no
@@ -914,7 +937,12 @@ export class ReaderSession {
         // every 20 s heartbeat forever. The pass that binds the bus repaints the
         // whole document, which covers the pages this pass left out.
         this.syncDocumentId();
-        if (this.overlayCount() === 0) void this.repaintAttached();
+        if (!this.isForeground()) {
+          this.workPausedInBackground = true;
+          this.paintOnSelectPending = true;
+        } else if (this.overlayCount() === 0) {
+          void this.repaintAttached();
+        }
         this.notify();
         return false;
       }
@@ -933,7 +961,11 @@ export class ReaderSession {
       }
       this.ready = true;
       this.syncDocumentId();
-      void this.repaintAttached();
+      if (this.isForeground()) void this.repaintAttached();
+      else {
+        this.workPausedInBackground = true;
+        this.paintOnSelectPending = true;
+      }
       // The state listener in main.js refreshes lastDiagnostics here, so the
       // recovery is visible in the diagnostics without a second code path.
       this.notify();
@@ -970,11 +1002,84 @@ export class ReaderSession {
    * @param {{paint?: boolean}} [options] `paint: false` verifies the identity only,
    * for a tab that is not the one on screen. Default true: the wake paints.
    */
+  /**
+   * Whether this reader tab is currently in the foreground (visible to the user).
+   * Background tabs defer detection and rendering until activated.
+   *
+   * @returns {boolean}
+   */
+  isForeground() {
+    try {
+      if (this.innerWin?.document?.visibilityState === "hidden") return false;
+    } catch (ignored) {
+      // Unreadable visibility falls through.
+    }
+    try {
+      if (this.reader?._iframeWindow?.document?.visibilityState === "hidden") return false;
+    } catch (ignored) {
+      // Unreadable outer visibility falls through.
+    }
+    try {
+      const zotero = globalThis.Zotero;
+      const readerAPI = zotero?.Reader;
+      const mainWin = typeof zotero?.getMainWindow === "function" ? zotero.getMainWindow() : null;
+      const selectedTabID = mainWin?.Zotero_Tabs?.selectedID ?? globalThis.Zotero_Tabs?.selectedID ?? null;
+      const ownTab = this.reader?.tabID ?? null;
+      if (selectedTabID !== null && selectedTabID !== undefined && ownTab !== null && ownTab !== undefined) {
+        return selectedTabID === ownTab;
+      }
+      const active = typeof readerAPI?.getActive === "function" ? readerAPI.getActive() : null;
+      if (active && this.reader) {
+        if (active === this.reader) return true;
+        const activeTab = active.tabID;
+        if (activeTab !== undefined && activeTab !== null && ownTab !== null && ownTab !== undefined) {
+          return activeTab === ownTab;
+        }
+        return false;
+      }
+    } catch (ignored) {
+      // Reader API optional in unit tests and cross-realm sandboxes.
+    }
+    return true;
+  }
+
+  /**
+   * Stops queued/in-flight detection and rendering while this tab is in the
+   * background so foreground tabs never compete with hidden ones. Completed
+   * overlays and RegionCache entries stay intact.
+   */
+  pauseBackgroundWork() {
+    this.paintEpoch += 1;
+    this.workPausedInBackground = true;
+    this.paintOnSelectPending = true;
+    if (this.documentCheckTimer !== null) {
+      clearTimeout(this.documentCheckTimer);
+      this.timers.delete(this.documentCheckTimer);
+      this.documentCheckTimer = null;
+    }
+    if (this.settledCheckTimer !== null) {
+      clearTimeout(this.settledCheckTimer);
+      this.timers.delete(this.settledCheckTimer);
+      this.settledCheckTimer = null;
+    }
+    for (const overlay of this.overlays.values()) {
+      if (!overlay || overlay.destroyed) continue;
+      if (overlay.tasks?.length > 0 || overlay.inFlightPaint) {
+        try {
+          overlay.cancel?.();
+          overlay.paintIncomplete = true;
+        } catch (ignored) {
+          // Best-effort cancellation of background work.
+        }
+      }
+    }
+  }
+
   onTabActivate({ paint = true } = {}) {
     if (this.destroyed) return;
     this.ensureCurrentDocument("tab-activate");
     if (!paint) {
-      this.paintOnSelectPending = true;
+      this.pauseBackgroundWork();
       return;
     }
     this.paintOnSelectPending = false;
@@ -1177,6 +1282,10 @@ export class ReaderSession {
     // "already detected" flag, so the next paint reads the cache of the document the
     // overlay is stamped with now.
     overlay.painted = false;
+    overlay.paintIncomplete = false;
+    overlay.detectPromise = null;
+    overlay.detectDocumentId = null;
+    overlay.inFlightPaint = null;
     overlay.regionBoxes = [];
   }
 
@@ -1321,27 +1430,58 @@ export class ReaderSession {
     return scopedDocumentId(this.cacheScope, this.documentId ?? "");
   }
 
+  /** Ensures a shared visibilitychange handler is created and bound to the reader's outer document. */
+  ensureVisHandler() {
+    if (!this.visHandler) {
+      this.visHandler = (event) => {
+        const targetDoc =
+          event?.currentTarget ?? event?.target ?? this.innerWin?.document ?? this.reader?._iframeWindow?.document;
+        if (targetDoc?.visibilityState === "hidden") {
+          this.pauseBackgroundWork();
+          return;
+        }
+        this.onTabActivate();
+      };
+    }
+    return this.visHandler;
+  }
+
+  /** Binds visibilitychange on the reader's own outer iframe document (never a foreign tab). */
+  bindOuterVisibility() {
+    try {
+      const outerDoc = this.reader?._iframeWindow?.document ?? null;
+      if (!outerDoc || typeof outerDoc.addEventListener !== "function" || this.outerVisTarget === outerDoc) return;
+      if (this.outerVisTarget && this.visHandler) {
+        try {
+          this.outerVisTarget.removeEventListener?.("visibilitychange", this.visHandler);
+        } catch (ignored) {}
+      }
+      outerDoc.addEventListener("visibilitychange", this.ensureVisHandler());
+      this.outerVisTarget = outerDoc;
+    } catch (err) {
+      warnOnce("visibility-bind-outer", err, this.tag);
+    }
+  }
+
   /** Subscribes to the event bus and starts the zoom watcher. */
   bindEvents() {
+    this.bindOuterVisibility();
     // A tab the user comes back to is the one moment the newly visible document can
     // be re-checked, and the realm it belongs to re-resolved. Bound per realm like
     // the bus subscriptions, so releaseRealm() and destroy() drop it with the rest.
-    // The reader's own window is the preferred target: Zotero 10 keeps hidden
-    // reader panels in the deck, and a realm latched from the bridge guess can be
-    // the *other* reader's window — whose visibility says nothing about this tab.
-    // Falling back to the latched realm keeps the old behavior when the chain is
-    // unresolvable.
-    const ownWindow = resolveInnerRealm(this.reader).win;
-    const realmDocument = ownWindow?.document ?? this.innerWin?.document ?? null;
+    // Never bind visibilitychange onto an unconfirmed bridge-guessed realm, since
+    // that window belongs to another tab and its hide event would pause this tab.
+    const ownResolution = resolveInnerRealm(this.reader);
+    const trustedWin =
+      ownResolution.provenance !== "bridge" && ownResolution.provenance !== "none"
+        ? ownResolution.win
+        : this.realmConfirmed()
+          ? this.innerWin
+          : null;
+    const realmDocument = trustedWin?.document ?? null;
     if (realmDocument && typeof realmDocument.addEventListener === "function") {
-      if (!this.visHandler) {
-        this.visHandler = () => {
-          if (this.innerWin?.document === realmDocument && realmDocument.visibilityState === "hidden") return;
-          this.onTabActivate();
-        };
-      }
       try {
-        realmDocument.addEventListener("visibilitychange", this.visHandler);
+        realmDocument.addEventListener("visibilitychange", this.ensureVisHandler());
         this.visChangeTarget = realmDocument;
       } catch (err) {
         warnOnce("visibility-bind", err, this.tag);
@@ -1474,6 +1614,10 @@ export class ReaderSession {
         return;
       }
       if (identity !== "ok") return;
+      if (!this.isForeground()) {
+        this.pauseBackgroundWork();
+        return;
+      }
       const pdfDocument = this.currentPDFDocument();
       // Read before `applyDocumentId()`: after a swap `cacheKey()` names the new
       // document, and invalidating that leaves the regions parsed from the previous
@@ -1484,6 +1628,12 @@ export class ReaderSession {
         if (!pdfDocument && this.documentId) {
           this.documentId = null;
           this.detachAll();
+        }
+        if (pdfDocument && this.workPausedInBackground) {
+          this.workPausedInBackground = false;
+          void this.repaintAttached();
+          this.scheduleSettledCheck();
+          return;
         }
         // The pages this sweep left unpainted get exactly one extra pass: a real
         // machine's first `pagesloaded` arrives while the page views are still
@@ -1720,7 +1870,28 @@ export class ReaderSession {
       overlay.innerWin = this.innerWin;
       this.restampOverlay(overlay);
     }
-    return this.track(overlay, this.paintOverlay(overlay));
+    const docKey = this.cacheKey();
+    if (
+      overlay.inFlightPaint &&
+      overlay.inFlightPaint.pageView === pageView &&
+      overlay.inFlightPaint.documentId === docKey &&
+      (typeof overlay.isMounted !== "function" || overlay.isMounted()) &&
+      (typeof overlay.geometryStale !== "function" || !overlay.geometryStale())
+    ) {
+      return overlay.inFlightPaint.promise;
+    }
+    if (typeof overlay.needsPaint === "function" && !overlay.needsPaint({ pageView, documentId: docKey })) {
+      return null;
+    }
+    const job = this.track(overlay, this.paintOverlay(overlay));
+    if (job) {
+      const record = { promise: job, pageView, documentId: docKey };
+      overlay.inFlightPaint = record;
+      void job.finally(() => {
+        if (overlay.inFlightPaint === record) overlay.inFlightPaint = null;
+      });
+    }
+    return job;
   }
 
   /**
@@ -1754,18 +1925,58 @@ export class ReaderSession {
   }
 
   /**
-   * Paints every page that already has a rendered pdfPage.
+   * Paints every page that already has a rendered pdfPage, one page at a time
+   * starting from the current page in view so visible figures never wait behind
+   * offscreen pages or starve the UI thread.
    *
    * @returns {Promise<void>}
    */
   async repaintAttached() {
     if (!this.enabled || this.destroyed) return;
-    const jobs = [];
-    for (const view of listPageViews(resolvePDFViewer(this.innerWin, this.tag))) {
-      const job = this.attachPageView(view);
-      if (job) jobs.push(job);
+    if (!this.isForeground()) {
+      this.workPausedInBackground = true;
+      this.paintOnSelectPending = true;
+      return;
     }
-    await Promise.all(jobs);
+    this.workPausedInBackground = false;
+    const epoch = ++this.paintEpoch;
+    const pdfViewer = resolvePDFViewer(this.innerWin, this.tag);
+    const remaining = listPageViews(pdfViewer).filter(
+      (view) => view?.pdfPage && view?.div && view?.viewport,
+    );
+    while (remaining.length) {
+      if (this.destroyed || !this.enabled || this.paintEpoch !== epoch) break;
+      if (!this.isForeground()) {
+        this.workPausedInBackground = true;
+        this.paintOnSelectPending = true;
+        break;
+      }
+      const cur = Number(pdfViewer?.currentPageNumber) || 1;
+      let bestIndex = 0;
+      let bestScore = null;
+      for (let i = 0; i < remaining.length; i += 1) {
+        const view = remaining[i];
+        const pageNum = Number(view?.id) || 0;
+        const dist = Math.abs(pageNum - cur);
+        const dirPenalty = pageNum < cur ? 1 : 0;
+        const renderedPenalty = view?.renderingState === 3 || Boolean(view?.canvas) ? 0 : 1;
+        const score = [dist, dirPenalty, renderedPenalty, pageNum];
+        if (
+          bestScore === null ||
+          score[0] < bestScore[0] ||
+          (score[0] === bestScore[0] &&
+            (score[1] < bestScore[1] ||
+              (score[1] === bestScore[1] &&
+                (score[2] < bestScore[2] || (score[2] === bestScore[2] && score[3] < bestScore[3])))))
+        ) {
+          bestScore = score;
+          bestIndex = i;
+        }
+      }
+      const [nextView] = remaining.splice(bestIndex, 1);
+      const job = this.attachPageView(nextView);
+      if (job) await job;
+    }
   }
 
   /**
@@ -1774,6 +1985,11 @@ export class ReaderSession {
    */
   onViewScaleChange() {
     if (!this.enabled || this.destroyed) return;
+    if (!this.isForeground()) {
+      this.workPausedInBackground = true;
+      this.paintOnSelectPending = true;
+      return;
+    }
     // A zoom is a repaint, so it reads the cache like every other paint: the boxes
     // this method reuses were parsed for the document the overlay was stamped with,
     // and a wake that finds another document has to say so before they are re-used.
@@ -1787,23 +2003,42 @@ export class ReaderSession {
     }
     if (identity !== "ok") return;
     const key = this.cacheKey();
-    const jobs = [];
-    for (const overlay of [...this.overlays.values()]) {
-      if (!overlay || overlay.destroyed) continue;
-      if (overlay.documentId !== key) {
-        // The mounted boxes belong to another document: drop them and let the paint
-        // below re-detect under this one, instead of re-positioning foreign boxes.
-        this.restampOverlay(overlay);
+    const epoch = ++this.paintEpoch;
+    const cur = Number(resolvePDFViewer(this.innerWin, this.tag)?.currentPageNumber) || 1;
+    const ordered = [...this.overlays.values()]
+      .filter((overlay) => overlay && !overlay.destroyed)
+      .sort((a, b) => {
+        const pa = Number(a.pageNumber) || 0;
+        const pb = Number(b.pageNumber) || 0;
+        const da = Math.abs(pa - cur);
+        const db = Math.abs(pb - cur);
+        if (da !== db) return da - db;
+        return pa - pb;
+      });
+    const run = async () => {
+      for (const overlay of ordered) {
+        if (this.destroyed || !this.enabled || this.paintEpoch !== epoch) break;
+        if (!this.isForeground()) {
+          this.workPausedInBackground = true;
+          this.paintOnSelectPending = true;
+          break;
+        }
+        if (overlay.destroyed) continue;
+        if (overlay.documentId !== key) {
+          // The mounted boxes belong to another document: drop them and let the paint
+          // below re-detect under this one, instead of re-positioning foreign boxes.
+          this.restampOverlay(overlay);
+        }
+        // Keep the cached regions, but drop the "already painted" assumption for
+        // pages that have not been rendered at the new scale yet.
+        const boxes = overlay.regionBoxes.length ? overlay.regionBoxes : null;
+        const job = boxes
+          ? this.track(overlay, overlay.paintRegions(boxes))
+          : this.track(overlay, this.paintOverlay(overlay));
+        if (job) await job;
       }
-      // Keep the cached regions, but drop the "already painted" assumption for
-      // pages that have not been rendered at the new scale yet.
-      const boxes = overlay.regionBoxes.length ? overlay.regionBoxes : null;
-      const job = boxes
-        ? this.track(overlay, overlay.paintRegions(boxes))
-        : this.track(overlay, this.paintOverlay(overlay));
-      if (job) jobs.push(job);
-    }
-    void Promise.all(jobs);
+    };
+    void run();
   }
 
   /**
@@ -1847,10 +2082,15 @@ export class ReaderSession {
       // not read its regions back from the cache and mount them again. A `rekeyed`
       // wake already repainted, and a `wait` paints nothing on purpose.
       if (this.ensureCurrentDocument("enable") === "ok") {
-        void this.repaintAttached();
-        // The paint above runs in the same tick as the toolbar state change, so
-        // schedule the correction pass for after the viewer finishes relayouting.
-        this.scheduleSettledCheck();
+        if (this.isForeground()) {
+          void this.repaintAttached();
+          // The paint above runs in the same tick as the toolbar state change, so
+          // schedule the correction pass for after the viewer finishes relayouting.
+          this.scheduleSettledCheck();
+        } else {
+          this.workPausedInBackground = true;
+          this.paintOnSelectPending = true;
+        }
       }
     }
     this.notify();
@@ -1944,6 +2184,14 @@ export class ReaderSession {
         // The realm document is already gone.
       }
       this.visChangeTarget = null;
+    }
+    if (this.visHandler && this.outerVisTarget) {
+      try {
+        this.outerVisTarget.removeEventListener?.("visibilitychange", this.visHandler);
+      } catch (ignored) {
+        // The outer reader document is already gone.
+      }
+      this.outerVisTarget = null;
     }
     this.pending.clear();
     this.listeners.clear();

@@ -12,7 +12,7 @@
   "applications": {
     "zotero": {
       "id": "figure-guard@zotero.org",
-      "update_url": "https://www.zotero.org/update/figure-guard",
+      "update_url": "https://williamslay.github.io/Zotero-FigureGuard/updates.json",
       "strict_min_version": "6.999",
       "strict_max_version": "10.9.9"
     }

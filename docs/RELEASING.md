@@ -192,9 +192,19 @@ built-in `GITHUB_TOKEN`.
 ## In-app automatic updates
 
 `manifest.json` declares
-`"update_url": "https://www.zotero.org/update/figure-guard"`. That
-path returns an HTML 404 page, not a JSON update manifest, so Zotero does not
-currently detect new GitHub Releases inside the app. Publishing to Releases is
-not the same as in-app auto-update. A future change can point `update_url` at a
-generated `updates.json` served by GitHub Pages; the URL has to name the manifest
-file itself.
+`"update_url": "https://williamslay.github.io/Zotero-FigureGuard/updates.json"`.
+
+For every formal (non-prerelease) release, `.github/workflows/release.yml` runs
+`scripts/generate-updates-json.mjs` after creating the GitHub Release and
+pushes the updated `updates.json` (preserving prior release entries and adding
+the new version's `update_link` and `sha256` `update_hash`) to the `gh-pages`
+branch without touching `main`.
+
+One-time repository setup in GitHub:
+
+- GitHub → **Settings** → **Pages** → **Build and deployment** → Source:
+  **Deploy from a branch**, Branch: **`gh-pages`** / **`(root)`**.
+
+Once GitHub Pages is enabled and at least one formal release after this change
+has been published, Zotero installations carrying this `update_url` will detect
+newer releases inside Zotero's Add-ons Manager.

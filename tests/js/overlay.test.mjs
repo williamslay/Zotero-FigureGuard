@@ -564,4 +564,27 @@ describe("overlay: mount integrity", () => {
     overlay.pageView.div.isConnected = false;
     assert.equal(overlay.ensureHostPositioning(), false, "a div out of the DOM is not a usable host");
   });
+
+  it("deduplicates concurrent in-flight detect() calls for the same document key", async () => {
+    resetWarnOnce();
+    let opCalls = 0;
+    let releaseOps;
+    const gate = new Promise((resolve) => {
+      releaseOps = resolve;
+    });
+    const overlay = fakeOverlay();
+    overlay.pageView.pdfPage.getOperatorList = async () => {
+      opCalls += 1;
+      await gate;
+      return { fnArray: [], argsArray: [] };
+    };
+    overlay.pageView.pdfPage.getTextContent = async () => ({ items: [] });
+
+    const first = overlay.detect();
+    const second = overlay.detect();
+    releaseOps();
+    const [a, b] = await Promise.all([first, second]);
+    assert.equal(opCalls, 1, "getOperatorList runs once instead of invalidating and repeating");
+    assert.deepEqual(a.regions, b.regions);
+  });
 });

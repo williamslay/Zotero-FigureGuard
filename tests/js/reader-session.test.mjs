@@ -1556,3 +1556,180 @@ describe("reader session: healing after a tab is hidden and shown again", () => 
     }
   });
 });
+
+describe("reader session: foreground-only execution and current-page priority", () => {
+  afterEach(() => resetWarnOnce());
+
+  function multiPageRealm({ numPages = 5, currentPageNumber = 1, visibilityState = "visible" } = {}) {
+    const pages = Array.from({ length: numPages }, (_, index) => ({
+      id: index + 1,
+      pdfPage: {
+        view: [0, 0, 612, 792],
+        getViewport: ({ scale = 1 } = {}) => ({ scale, width: 612 * scale, height: 792 * scale, rotation: 0 }),
+        getOperatorList: async () => ({ fnArray: [], argsArray: [] }),
+        getTextContent: async () => ({ items: [] }),
+        render: () => ({ promise: Promise.resolve(), cancel() {} }),
+      },
+      div: { style: {}, isConnected: true, appendChild() {} },
+      viewport: { width: 612, height: 792, scale: 1, rotation: 0 },
+    }));
+    const viewer = { currentPageNumber, _pagesView: pages, pdfDocument: { numPages, fingerprints: ["prio"] } };
+    const app = { pdfViewer: viewer, eventBus: fakeEventBus() };
+    return {
+      PDFViewerApplication: app,
+      document: { readyState: "complete", visibilityState, createElement: () => ({ style: {}, classList: { add() {}, remove() {} } }) },
+      _pages: pages,
+      _viewer: viewer,
+    };
+  }
+
+  it("paints the current page first and processes remaining pages one at a time", async () => {
+    resetWarnOnce();
+    const realm = multiPageRealm({ numPages: 5, currentPageNumber: 3 });
+    const session = newSession(fakeReader(701, realm));
+    session.adoptRealm(resolveInnerRealm(session.reader, session.tag));
+    session.documentId = "fcp:prio";
+
+    const order = [];
+    let active = 0;
+    let maxConcurrent = 0;
+    const originalAttach = session.attachPageView.bind(session);
+    session.attachPageView = (view) => {
+      order.push(view.id);
+      active += 1;
+      maxConcurrent = Math.max(maxConcurrent, active);
+      const job = originalAttach(view);
+      if (!job) {
+        active -= 1;
+        return null;
+      }
+      return job.finally(() => {
+        active -= 1;
+      });
+    };
+
+    await session.repaintAttached();
+
+    assert.equal(maxConcurrent, 1, "pages run sequentially instead of flooding all pages concurrently");
+    assert.deepEqual(order, [3, 4, 2, 5, 1], "current page runs first, followed by nearest neighbors");
+    session.destroy();
+  });
+
+  it("defers painting while hidden, pauses active queues on switch-away, and resumes on return", async () => {
+    const timers = fakeTimers();
+    try {
+      resetWarnOnce();
+      const realm = multiPageRealm({ numPages: 4, currentPageNumber: 1, visibilityState: "hidden" });
+      const session = newSession(fakeReader(702, realm));
+      session.adoptRealm(resolveInnerRealm(session.reader, session.tag));
+      session.documentId = "fcp:prio";
+      session.ready = true;
+
+      let attachCalls = 0;
+      const originalAttach = session.attachPageView.bind(session);
+      session.attachPageView = (view) => {
+        attachCalls += 1;
+        return originalAttach(view);
+      };
+
+      await session.repaintAttached();
+      assert.equal(attachCalls, 0, "a hidden tab does not run detection or rendering");
+      assert.equal(session.paintOnSelectPending, true, "hidden tab marks work pending for foreground return");
+
+      session.onPageRenderedEvent({ pageNumber: 1 });
+      assert.equal(attachCalls, 0, "pagerendered is also deferred while the tab is hidden");
+
+      // Switch to foreground and activate: queued work resumes.
+      realm.document.visibilityState = "visible";
+      session.onTabActivate();
+      await timers.fireNext();
+
+      assert.ok(attachCalls >= 4, "returning to foreground paints the deferred pages");
+      assert.equal(session.workPausedInBackground, false);
+      session.destroy();
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("stops remaining queued pages immediately when pauseBackgroundWork runs mid-sweep", async () => {
+    resetWarnOnce();
+    const realm = multiPageRealm({ numPages: 4, currentPageNumber: 1 });
+    const session = newSession(fakeReader(703, realm));
+    session.adoptRealm(resolveInnerRealm(session.reader, session.tag));
+    session.documentId = "fcp:prio";
+
+    let releasePage1;
+    const page1Gate = new Promise((resolve) => {
+      releasePage1 = resolve;
+    });
+    const started = [];
+    session.attachPageView = (view) => {
+      started.push(view.id);
+      if (view.id === 1) return page1Gate;
+      return Promise.resolve();
+    };
+
+    const sweep = session.repaintAttached();
+    assert.deepEqual(started, [1], "only the current page starts first");
+    session.pauseBackgroundWork();
+    releasePage1();
+    await sweep;
+
+    assert.deepEqual(started, [1], "switching away cancels the rest of the queue");
+    assert.equal(session.workPausedInBackground, true);
+    session.destroy();
+  });
+
+  it("reuses an in-flight paint job instead of cancelling when pagerendered overlaps", async () => {
+    resetWarnOnce();
+    const realm = multiPageRealm({ numPages: 1, currentPageNumber: 1 });
+    let opCalls = 0;
+    let releaseOps;
+    const opsGate = new Promise((resolve) => {
+      releaseOps = resolve;
+    });
+    realm._pages[0].pdfPage.getOperatorList = async () => {
+      opCalls += 1;
+      await opsGate;
+      return { fnArray: [], argsArray: [] };
+    };
+    const session = newSession(fakeReader(704, realm));
+    session.adoptRealm(resolveInnerRealm(session.reader, session.tag));
+    session.documentId = "fcp:prio";
+
+    const first = session.attachPageView(realm._pages[0]);
+    const second = session.attachPageView(realm._pages[0]);
+    assert.equal(first, second, "overlapping attachPageView reuses the in-flight job");
+
+    releaseOps();
+    await first;
+    assert.equal(opCalls, 1, "detection only runs once for overlapping triggers");
+    session.destroy();
+  });
+
+  it("heals paused foreground state when pagerendered arrives on the visible tab", async () => {
+    resetWarnOnce();
+    const realm = multiPageRealm({ numPages: 2, currentPageNumber: 1, visibilityState: "visible" });
+    const session = newSession(fakeReader(705, realm));
+    session.adoptRealm(resolveInnerRealm(session.reader, session.tag));
+    session.documentId = "fcp:prio";
+    session.ready = true;
+    session.workPausedInBackground = true;
+    session.paintOnSelectPending = true;
+
+    const painted = [];
+    session.attachPageView = (view) => {
+      painted.push(view.id);
+      return Promise.resolve();
+    };
+
+    session.onPageRenderedEvent({ pageNumber: 2 });
+    await Promise.resolve();
+
+    assert.equal(session.workPausedInBackground, false, "scrolling on the visible tab clears paused state");
+    assert.equal(session.paintOnSelectPending, false, "and clears pending select");
+    assert.ok(painted.includes(2) && painted.includes(1), "both the scrolled page and current page get painted");
+    session.destroy();
+  });
+});

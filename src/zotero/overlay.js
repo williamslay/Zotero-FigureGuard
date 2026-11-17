@@ -481,6 +481,14 @@ export class PageOverlay {
     this.lastPaintGeometry = null;
     /** @type {boolean} True once regions were detected and painted. */
     this.painted = false;
+    /** @type {boolean} True when a render pass was cancelled mid-flight and needs resuming. */
+    this.paintIncomplete = false;
+    /** @type {Promise<*>|null} In-flight detect() promise, so concurrent callers share one parse. */
+    this.detectPromise = null;
+    /** @type {string|null} Document cache key the in-flight detectPromise belongs to. */
+    this.detectDocumentId = null;
+    /** @type {{promise: Promise<void>, pageView: object, documentId: string}|null} Active paint job for dedup. */
+    this.inFlightPaint = null;
     /**
      * @type {number} Bumped on every cancel(), so a rejected render task can
      * tell whether its own paint pass is still the current one.
@@ -534,7 +542,24 @@ export class PageOverlay {
   }
 
   /**
-   * Runs detection, reusing the shared per-page cache result.
+   * True when this overlay still needs detection or painting for `pageView` and
+   * `documentId` (not yet painted, cancelled mid-pass, detached, moved, or errored).
+   *
+   * @param {{pageView: object, documentId: string}} expected
+   * @returns {boolean}
+   */
+  needsPaint({ pageView, documentId }) {
+    if (this.destroyed) return false;
+    if (!this.painted || this.paintIncomplete || this.lastPaintError) return true;
+    if (this.pageView !== pageView || this.documentId !== documentId) return true;
+    if (typeof this.isMounted === "function" && !this.isMounted()) return true;
+    if (typeof this.geometryStale === "function" && this.geometryStale()) return true;
+    return false;
+  }
+
+  /**
+   * Runs detection, reusing the shared per-page cache result and deduplicating
+   * concurrent in-flight detections for the same document key.
    *
    * @returns {Promise<{regions: Array<object>, diagnostics: object|null}|null>}
    */
@@ -549,24 +574,41 @@ export class PageOverlay {
         this.diagnostics = cached.diagnostics ?? null;
         this.painted = true;
       } else {
-        const token = this.regionCache.begin(this.documentId, this.pageNumber);
-        const result = await detectPageRegions({
-          // Detection reads the page data out of the reader realm, so it gets a
-          // local copy: TypedArray element access through an Xray wrapper throws.
-          pdfPage: localPDFPage(pdfPage),
-          // undefined keeps the core on its validated MEASURED_OP_CODES table.
-          OPS: this.resolveOPS() ?? undefined,
-        });
-        if (this.destroyed || !this.regionCache.isCurrent(token)) return null;
-        const regions = result?.regions ?? [];
-        this.regionCache.set(this.documentId, this.pageNumber, {
-          regions,
-          diagnostics: result?.diagnostics ?? null,
-        });
-        this.regionBoxes = regions.map((region) => region.rect);
-        this.regionKinds = regions.map((region) => regionKindLabel(region.sourceKinds));
-        this.diagnostics = result?.diagnostics ?? null;
-        this.painted = true;
+        const docKey = this.documentId;
+        if (this.detectPromise && this.detectDocumentId === docKey) {
+          return this.detectPromise;
+        }
+        const run = (async () => {
+          const token = this.regionCache.begin(docKey, this.pageNumber);
+          const result = await detectPageRegions({
+            // Detection reads the page data out of the reader realm, so it gets a
+            // local copy: TypedArray element access through an Xray wrapper throws.
+            pdfPage: localPDFPage(pdfPage),
+            // undefined keeps the core on its validated MEASURED_OP_CODES table.
+            OPS: this.resolveOPS() ?? undefined,
+          });
+          if (this.destroyed || !this.regionCache.isCurrent(token) || this.documentId !== docKey) return null;
+          const regions = result?.regions ?? [];
+          this.regionCache.set(docKey, this.pageNumber, {
+            regions,
+            diagnostics: result?.diagnostics ?? null,
+          });
+          this.regionBoxes = regions.map((region) => region.rect);
+          this.regionKinds = regions.map((region) => regionKindLabel(region.sourceKinds));
+          this.diagnostics = result?.diagnostics ?? null;
+          this.painted = true;
+          return { regions: this.regionBoxes, regionKinds: this.regionKinds, diagnostics: this.diagnostics };
+        })();
+        this.detectPromise = run;
+        this.detectDocumentId = docKey;
+        try {
+          return await run;
+        } finally {
+          if (this.detectPromise === run) {
+            this.detectPromise = null;
+            this.detectDocumentId = null;
+          }
+        }
       }
     }
     return { regions: this.regionBoxes, regionKinds: this.regionKinds, diagnostics: this.diagnostics };
@@ -606,6 +648,7 @@ export class PageOverlay {
       at: Date.now(),
     };
     this.lastPaintError = null;
+    this.paintIncomplete = false;
     this.cancel();
     // Taken after cancel(), so it identifies this pass: any later cancel()
     // changes it and marks this pass as superseded.
@@ -734,6 +777,10 @@ export class PageOverlay {
       // A cancel() from a zoom burst means the next paint owns the canvases.
       if (this.generation !== generation) break;
     }
+    if (this.destroyed || this.generation !== generation) {
+      this.paintIncomplete = true;
+      return;
+    }
     // Reported once the pass is over, for both render routes: pixels written into a
     // canvas that is not in the live DOM are invisible, which is what the real
     // machine showed for the document whose tab was switched to.
@@ -813,6 +860,7 @@ export class PageOverlay {
   /** Cancels in-flight pdf.js render tasks. */
   cancel() {
     this.generation += 1;
+    this.inFlightPaint = null;
     const tasks = this.tasks;
     this.tasks = [];
     for (const entry of tasks) {
@@ -841,6 +889,10 @@ export class PageOverlay {
     // copy means the next paint() has to run detection again. Keeping painted
     // true here would let a later paint() paint an empty region list forever.
     this.painted = false;
+    this.paintIncomplete = false;
+    this.detectPromise = null;
+    this.detectDocumentId = null;
+    this.inFlightPaint = null;
   }
 
   /** Drops all references so the page view can be released. */

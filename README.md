@@ -77,7 +77,7 @@ node scripts/verify-xpi.mjs
 npm run test:ci
 ```
 
-只跑不碰真实 PDF 的测试文件（当前 17 个文件、430 个用例），全部实际执行并通过，结果里 `cancelled` 必须为 0。GitHub Actions 的 CI 就是这一级。
+只跑不碰真实 PDF 的测试文件（当前 18 个文件、431 个用例），全部实际执行并通过，结果里 `cancelled` 必须为 0。GitHub Actions 的 CI 就是这一级。
 
 **Level 2 — 完整 fixture 回归**（需要真实 PDF）
 
@@ -95,7 +95,7 @@ HiKV - A Hybrid Index Key-Value Store for DRAM-NVM Memory Systems.pdf
 fixture/PipeBWrite.pdf
 ```
 
-完整回归共 24 个文件、512 个用例。缺少这些 PDF 时，`npm test` 会得到 433 通过、79 取消（cancelled）、0 失败：被取消的 79 个用例来自 7 个依赖真实 PDF 的测试文件，它们的 `before` 钩子打不开文件。`npm run test:ci` 会跳过这 7 个文件，所以公开 CI 里不会出现「大量 cancelled 冒充通过」。完整回归只在维护者本地跑，不作为公开 CI 的强制门槛。
+完整回归共 25 个文件、513 个用例。缺少这些 PDF 时，`npm test` 会得到 434 通过、79 取消（cancelled）、0 失败：被取消的 79 个用例来自 7 个依赖真实 PDF 的测试文件，它们的 `before` 钩子打不开文件。`npm run test:ci` 会跳过这 7 个文件，所以公开 CI 里不会出现「大量 cancelled 冒充通过」。完整回归只在维护者本地跑，不作为公开 CI 的强制门槛。
 
 ## 工作原理
 

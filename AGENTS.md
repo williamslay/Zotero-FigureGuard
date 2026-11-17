@@ -58,21 +58,14 @@ Zotero Figure Guard 是 Zotero 7–10 的 PDF 阅读器扩展。深色主题下�
 
 - `sessions: Map<reader, {session, startPromise, closeWatch}>`（`src/zotero/main.js:125`、`716`）。`ensureSession` 与 `syncOpenReaders` 走同一函数、同一 reader 键，所以单 reader 单会话。
 - `session.start()` 不能被工具栏处理器等待，因为 `append` 必须同步返回（`src/zotero/main.js:721-725`）。这就是「图表照常恢复、按钮可能没挂」能同时成立的原因。
-- `buttonLinks: Map<session, link>`（`src/zotero/main.js:127`、`694`）。link 记录 `button`、`bindings`、`off`、`paint`，以及 `renderToolbar` 给的 `toolbarDoc`、`append`、`parent`（`src/zotero/main.js:983`），供补挂时找回原容器。
-- 按钮的唯一正常创建路径是 `onRenderToolbar`（`src/zotero/main.js:862-897`）；`createButton` 每次都先 `detachButton`（`src/zotero/main.js:349-351`）。按钮的唯一补挂路径是 `maintainButtons()`（`src/zotero/main.js:334`），由 `wakeTabSessions` 调用，条件是节点已脱离文档且该 toolbar document 内没有我们的 `.fg-toggle`。
+- `buttonLinks: Map<session, link>`（`src/zotero/main.js`）。link 记录 `button`、`doc`、`onPointerDown`、`onMouseUp`、`onClick`、`off`，以及 `renderToolbar` 给的 `toolbarDoc`、`append`、`parent`，供补挂时找回原容器。
+- 按钮的唯一正常创建路径是 `onRenderToolbar`（`src/zotero/main.js`）；`createButton` 每次都先 `detachButton`。按钮的唯一补挂路径是 `maintainButtons()`（`src/zotero/main.js`），由 `wakeTabSessions` 调用，条件是节点已脱离文档且该 toolbar document 内没有我们的 `.fg-toggle`。
+- Zotero 阅读器 `DIV.toolbar` 带有 `-moz-window-dragging: drag`；`.fg-toggle` 必须显式设置 `-moz-window-dragging: no-drag`（样式表与内联样式双写），否则 Windows 会把单击当作标题栏拖拽拦截。
 - 覆盖层 canvas 挂在 `pageView.div` 里；阅读器滚动会回收并重建 pageView，canvas 随之离开文档。稳定重绘检查同时看几何是否过期（`geometryStale()`）与 canvas 是否还在文档（`isMounted()`），两者任一成立就重绘，并走 `attachPageNumber()` 把记录重绑到活的 pageView。
 
-## 激活阶梯与临时读数
+## 激活阶梯
 
-工具栏开关的激活顺序是 `pointerdown` → `mouseup` → `click`，一次按下序列只动作一次：`pressActivated` 由 pointerdown 或 mouseup 置位，由收尾的 click 复位；键盘 `click`（`detail === 0` 严格相等）不受该标志影响。绑定目标集合是 `renderToolbar` 给的 document、它的 `defaultView`、按钮本身、主窗口 document、reader 内层文档，全部捕获阶段。
-
-真机诊断用的临时读数渲染在按钮内的 `span.fg-count`，格式为：
-
-```text
-p# t# c# m# k# D# W# B# M# I# U# a# 宽x高 @x,y x=<事件目标> LT=<左x上>
-```
-
-含义：`p`/`k`/`m` = pointerdown / mouseup / click 三档各自被接受的次数，`c` = 键盘 click，`t` = 真正调用的 `toggle()`，`D/W/B/M/I` = 五个绑定目标看到的 pointerdown 次数，`U` = 去重后的 pointerup，`a` = 我们的节点是否挂在文档里，宽高与 `LT` = 盒尺寸与位置。不变量 `p + c + m + k === t` 有测试断言。这组计数与 `span.fg-count` 是临时诊断件，真机验收后要一并移除。
+工具栏开关的激活顺序是 `pointerdown` → `mouseup` → `click`，绑定在 `renderToolbar` 给的 toolbar document 捕获阶段，一次按下序列只动作一次：`pressActivated` 由 pointerdown 或 mouseup 置位，mouseup 落在按钮外或收尾的 click 到达时复位；键盘 `click`（`detail === 0` 严格相等）不受该标志影响。`hitToggle` 同时支持包围盒命中、已挂载按钮及其子孙的直接目标命中（兼容真机键盘 `(0, 0)` 坐标事件），以及按钮被 React 替换后的 `.fg-toggle` stand-in。
 
 ## 分支模型
 
@@ -104,8 +97,8 @@ p# t# c# m# k# D# W# B# M# I# U# a# 宽x高 @x,y x=<事件目标> LT=<左x上>
 
 ## 两级测试
 
-- `npm run test:ci` — 公开 CI 级，不需要受版权保护的 PDF。只跑不碰真实 PDF 的测试文件（当前 17 个文件、430 个用例），全部实际执行并通过，结果里 `cancelled` 必须为 0。GitHub Actions 的 CI 就是这一级。
-- `npm test`（等价于 `npm run test:fixture`）— 维护者本地的完整回归级，当前 24 个文件、512 个用例。检测层的回归基线取自 5 篇论文的 PDF，这些 PDF 受版权保护、不随仓库分发，需要自行放到 README「运行测试」一节列出的路径。缺少这些 PDF 时，依赖真实 PDF 的 79 个用例会取消（cancelled）而不是通过，所以完整回归只在维护者本地跑，不作为公开 CI 的强制门槛。
+- `npm run test:ci` — 公开 CI 级，不需要受版权保护的 PDF。只跑不碰真实 PDF 的测试文件（当前 18 个文件、431 个用例），全部实际执行并通过，结果里 `cancelled` 必须为 0。GitHub Actions 的 CI 就是这一级。
+- `npm test`（等价于 `npm run test:fixture`）— 维护者本地的完整回归级，当前 25 个文件、513 个用例。检测层的回归基线取自 5 篇论文的 PDF，这些 PDF 受版权保护、不随仓库分发，需要自行放到 README「运行测试」一节列出的路径。缺少这些 PDF 时，依赖真实 PDF 的 79 个用例会取消（cancelled）而不是通过，所以完整回归只在维护者本地跑，不作为公开 CI 的强制门槛。
 
 规范命令是 `npm test`；直接跑裸 `node --test` 会有一次伪失败。检测基线（已接受区域数）：PipeBWrite 18、FluidKV 18、Flash 10、Borges 9，另有 HiKV fixture。改 `src/core/` 任何阈值都要跑 `npm test` 并核对这组数字。
 

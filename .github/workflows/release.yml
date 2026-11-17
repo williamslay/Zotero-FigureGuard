@@ -121,3 +121,41 @@ jobs:
           gh release create "${args[@]}"
           gh release view "$TAG" --json tagName,isPrerelease,assets \
             --jq '"Published \(.tagName) (prerelease: \(.isPrerelease)) with assets: \([.assets[].name] | join(", "))"'
+
+      - name: Update GitHub Pages updates.json
+        if: github.event.inputs.prerelease != 'true'
+        run: |
+          set -eu
+          version="${TAG#v}"
+          pages_dir="$(mktemp -d)"
+          trap 'git worktree remove --force "$pages_dir" >/dev/null 2>&1 || rm -rf "$pages_dir"' EXIT
+          existing_arg=()
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch --no-tags --depth=1 origin +refs/heads/gh-pages:refs/remotes/origin/gh-pages
+            git worktree add --detach "$pages_dir" refs/remotes/origin/gh-pages
+            if [ -f "$pages_dir/updates.json" ]; then
+              cp "$pages_dir/updates.json" "$pages_dir/.existing-updates.json"
+              existing_arg=(--existing "$pages_dir/.existing-updates.json")
+            fi
+          else
+            git worktree add --detach "$pages_dir" HEAD
+            git -C "$pages_dir" checkout --orphan gh-pages
+            git -C "$pages_dir" rm -rf --ignore-unmatch . >/dev/null
+          fi
+          node scripts/generate-updates-json.mjs \
+            --repo "$GITHUB_REPOSITORY" \
+            --expect-version "$version" \
+            --dist dist \
+            "${existing_arg[@]}" \
+            --out "$pages_dir/updates.json"
+          rm -f "$pages_dir/.existing-updates.json"
+          touch "$pages_dir/.nojekyll"
+          git -C "$pages_dir" config user.name "github-actions[bot]"
+          git -C "$pages_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$pages_dir" add updates.json .nojekyll
+          if git -C "$pages_dir" diff --cached --quiet; then
+            echo "updates.json already up to date on gh-pages."
+          else
+            git -C "$pages_dir" commit -m "chore: publish updates.json for ${TAG}"
+            git -C "$pages_dir" push origin HEAD:refs/heads/gh-pages
+          fi

@@ -6,28 +6,11 @@
 
 真机环境统一为 Zotero 10.0.8 / Windows。
 
-## 1. 工具栏「原色」开关单击不生效 — 未解决
+## 1. 工具栏「原色」开关单击不生效 — 已解决（真机已验收）
 
-**现象**：单击开关既不改按钮样式也不改图表颜色，需要连点两下；双击的每一次按下都被记录，且各只动作一次。
+**根因**：Zotero 阅读器的 `DIV.toolbar` 带有 `-moz-window-dragging: drag`；我们的 `BUTTON.fg-toggle` 设了 `appearance: none` 但未设置 `-moz-window-dragging: no-drag`（计算值为 `default`），导致 Windows 将单击当作标题栏窗口拖拽拦截，`D/W/B/M/I/U` 均未收到按下事件；双击时才漏出 `k1 + p1 = t2`。
 
-**已排除**（都有实测或源码依据）：
-
-- 事件绑定方式：改绑 `pointerdown` 后症状不变。
-- 覆盖层拦截：覆盖层是 `pointer-events: none`。
-- 图标本身：开关已是纯文字。
-- 窗口激活：重新激活 Zotero 窗口后，原生工具栏按钮第一次单击就生效；但先点 PDF 页面空白处激活、再单击我们的开关，仍然无效。
-- 原生 tooltip 吃掉首次按下：Windows 上 tooltip 由系统显示（mozilla-central `layout/xul/nsXULTooltipListener.cpp:554-556`），且 tooltip 不捕获鼠标（Raymond Chen, The Old New Thing, 2020-01-10）。Zotero/Firefox 语境里没有该症状的先例记录。去掉按钮 `title` 后症状不变。
-- 读数本身不可信：读数一度挂在 tooltip 里，现在渲染进按钮内的 `span.fg-count`，不悬停也能看到，冻结状态可复核。
-
-**决定性证据**（构建 SHA256 `e6dfb0be…`）：单击那一次 `D/W/B/M/I` 全为 0，`@-,-`、`x=?`，即五个候选目标（`renderToolbar` 给的 document、它的 `defaultView`、按钮本身、主窗口 document、reader 内层文档）都没看到这次 pointerdown。间隔约 1 秒连点两次单击，计数仍全 0。chip 尺寸 225x25，说明被点的就是我们正在读数的那颗节点。
-
-**代码状态**：`dev` 上 `6d615ce` 把激活改成阶梯 `pointerdown` → `mouseup` → `click`，一次按下序列只动作一次，`pressActivated` 负责去重，键盘 `click`（`detail === 0`）绕过该标志。此前 click 被 `detail === 0` 过滤挡住了，而 Zotero 自身的阅读器工具栏按钮全部只用 `click`，所以这一档最可能才是真实通路。
-
-**下一步判别法**：
-
-- 单击时 `m` 或 `k` 增加且颜色恢复 → 问题解决，删除全部临时计数。
-- `m` 或 `k` 增加而颜色仍是灰的 → 事件侧已通，问题在绘制侧。
-- `m`/`k`/`p` 全不动 → 输入根本没进 iframe 的 DOM，DOM 按下类监听已耗尽，需要换 Zotero 层面的触发（挂进 Zotero 自己的 React 工具栏，或改用不受该 iframe 焦点流程影响的宿主）。
+**修复与清理**：已在 `TOGGLE_CSS` 与内联样式中显式设置 `-moz-window-dragging: no-drag`，并修复 `hitToggle` 对已挂载直接目标的命中（兼容键盘 `(0, 0)` 坐标）。真机已确认单击生效，随后已一并移除临时诊断计数、`span.fg-count` 及多余的跨文档/窗口绑定目标。
 
 ## 2. 开关节点会丢失，且跨重启与切标签不复原 — 待真机
 
@@ -51,13 +34,13 @@
 
 **待真机确认两点**：滚动过程中是否仍能看见灰→色的恢复延迟；是否存在完全不触发 `pagerendered` 的页面回收路径（那种情况下稳定检查不会被 arm，仍需别的触发点）。
 
-## 4. 首次恢复偶尔有延迟 — 未解决（本轮未改）
+## 4. 首次恢复延迟与多标签并发 — 待真机（本轮已改调度）
 
-检测是异步的，多区域是逐个串行光栅化（pdf.js 一页只跑一个渲染任务），首绘还可能跑在 pdf.js 建好 page view 之前，由既有的 `catchUpPaint` 兜一次。属于已知代价，不是缺陷回归。
+此前 `repaintAttached()` 与 `onViewScaleChange()` 会用 `Promise.all` 把整篇 PDF 的所有页面并发全跑，且后台标签也会在 `start()` / `recoveryPass()` / `pagerendered` 中直接执行检测与渲染，导致打开新标签时首屏可见页被全篇以及后台页签抢占。本轮已改为仅前台执行（`isForeground()` + 切走即 `pauseBackgroundWork()`）、按 `currentPageNumber` 距离动态优先串行调度，并对同页 `detect()` 与 `inFlightPaint` 去重，待真机验证首屏变色速度与按钮响应性。
 
-## 5. 文档计数漂移 — 待同步
+## 5. 文档计数漂移 — 已同步
 
-README「运行测试」一节的用例数此前停在 405（CI 级）与 487（完整回归），实际已到 430 与 512。本轮已在 README 与 AGENTS.md 同步；此后每次改动测试都要一并更新这两处。
+自动更新清单与测试补齐后，README 与 AGENTS.md 的用例数已同步为 431（CI 级）与 513（完整回归）。此后每次改动测试都要一并更新这两处。
 
 ## 6. 未验证项清单
 
@@ -73,7 +56,3 @@ README「运行测试」一节的用例数此前停在 405（CI 级）与 487（
 - 规则按学术 PDF 的常见图表形态调校：矢量路径、Form XObject、双栏排版。纯位图扫描件与特殊着色方式尚未覆盖。
 - 图注与图相隔较远的排版、并排小图各自成带等边界情形，仍会漏检或并错。
 - Zotero 大版本升级后 pdf.js 的内部结构可能变化，排查入口是 `probeAll()` 的字段。
-
-## 清理待办
-
-真机结论确定后要一并移除的临时诊断件：读数里的全部计数器（`p t c m k D W B M I U a` 与 `@x,y`、`x=`、`LT=`）、`span.fg-count` 及其 CSS 规则、以及为定位而加的多余绑定目标。AGENTS.md 的「激活阶梯与临时读数」一节列出了它们。

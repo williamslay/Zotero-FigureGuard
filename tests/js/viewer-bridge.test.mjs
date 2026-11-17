@@ -200,6 +200,17 @@ describe("VIEWER_BRIDGE_SRC: the identity miss and the single-reader fallback", 
     assert.equal(evaluateBridge(win)({ tabID: "tab-a" }), framed, "the reader named by the tab is the one with a frame");
   });
 
+  it("is null with wantApp when two readers are open and a booting iframe window has no match yet", () => {
+    const foreignApp = { pdfViewer: { foreign: true } };
+    const win = windowWith([{ PDFViewerApplication: foreignApp }, null], ["tab-a", "tab-b"]);
+    const bootingIframe = { PDFViewerApplication: undefined };
+    assert.equal(
+      evaluateBridge(win)(bootingIframe, true),
+      null,
+      "a booting second tab's iframe must never inherit the first tab's PDFViewerApplication",
+    );
+  });
+
   it("still resolves an identity match when the argument's tabID read throws", () => {
     const frame = { PDFViewerApplication: {} };
     const arg = { _internalReader: { _primaryView: { _iframeWindow: frame } } };
