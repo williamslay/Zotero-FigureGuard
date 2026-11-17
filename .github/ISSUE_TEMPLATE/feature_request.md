@@ -1,14 +1,14 @@
 ---
 name: Feature request
-about: 提出新功能建议或检测规则改进想法
+about: Suggest an enhancement or detection improvement
 title: "[Feature]: "
 labels: enhancement
 ---
 
-## 需求背景
+## Motivation
 
-你在使用深色主题阅读 PDF 时遇到了什么不便？
+What issue or friction did you encounter while reading PDFs in dark mode?
 
-## 期望方案
+## Proposed Solution
 
-希望插件提供什么样的能力或交互方式？
+What capability or interaction would you like the extension to support?

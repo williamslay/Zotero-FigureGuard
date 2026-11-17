@@ -41,9 +41,72 @@ export const MAX_PROBE_SESSIONS = 8;
 /** Longest `location.href` one `probeAll` entry carries, in characters. */
 export const REALM_HREF_MAX = 120;
 
-/** Button text and tooltip, kept as constants so they are easy to localise. */
-export const BUTTON_LABEL = "原色";
-export const BUTTON_TITLE = "图表原色显示";
+/** Button text and tooltip per UI locale: Chinese uses 原色, others use Original. */
+export const BUTTON_TEXT_ZH = Object.freeze({
+  label: "原色",
+  title: "图表原色显示",
+});
+export const BUTTON_TEXT_EN = Object.freeze({
+  label: "Original",
+  title: "Show figures in original color",
+});
+export const BUTTON_LABEL = BUTTON_TEXT_ZH.label;
+export const BUTTON_TITLE = BUTTON_TEXT_ZH.title;
+
+/**
+ * Returns true when a BCP 47 / POSIX locale tag denotes Chinese (`zh` or `zh-*`).
+ *
+ * @param {string|null|undefined} locale
+ * @returns {boolean}
+ */
+export function isChineseLocale(locale) {
+  if (typeof locale !== "string") return false;
+  const normalized = locale.trim().toLowerCase().replace(/_/g, "-");
+  return normalized === "zh" || normalized.startsWith("zh-");
+}
+
+/**
+ * Detects Zotero's active UI locale string, or null when unavailable.
+ * Zotero and Gecko locale services take precedence over reader document
+ * attributes so the toolbar label follows Zotero's UI language setting.
+ *
+ * @param {object|null} [doc]
+ * @returns {string|null}
+ */
+export function resolveZoteroLocale(doc = null) {
+  const read = (fn) => {
+    try {
+      const value = fn();
+      return typeof value === "string" && value.trim() ? value.trim() : null;
+    } catch {
+      return null;
+    }
+  };
+  return (
+    read(() => globalThis.Zotero?.locale) ??
+    read(() => globalThis.Services?.locale?.appLocaleAsBCP47) ??
+    read(() => globalThis.Services?.locale?.appLocalesAsBCP47?.[0]) ??
+    read(() => globalThis.Services?.locale?.requestedLocales?.[0]) ??
+    read(() => globalThis.Zotero?.Prefs?.get?.("intl.locale.requested", true)) ??
+    read(() => doc?.documentElement?.lang) ??
+    read(() => doc?.documentElement?.getAttribute?.("lang")) ??
+    read(() => doc?.defaultView?.navigator?.language) ??
+    read(() => globalThis.navigator?.language) ??
+    null
+  );
+}
+
+/**
+ * Resolves the toolbar toggle text and tooltip for the given locale or doc.
+ * Chinese locales use "原色"; all other or unknown locales use "Original".
+ *
+ * @param {string|object|null} [localeOrDoc]
+ * @returns {{label: string, title: string}}
+ */
+export function resolveButtonStrings(localeOrDoc = null) {
+  const locale = typeof localeOrDoc === "string" ? localeOrDoc : resolveZoteroLocale(localeOrDoc);
+  return isChineseLocale(locale) ? BUTTON_TEXT_ZH : BUTTON_TEXT_EN;
+}
 
 /** Class and style-node id for the toolbar toggle's injected stylesheet. */
 const TOGGLE_CLASS = "fg-toggle";
@@ -69,6 +132,7 @@ const TOGGLE_CSS = `
   border-radius: 4px;
   font: inherit;
   line-height: 1.5;
+  white-space: nowrap;
   cursor: pointer;
   color: rgba(128, 128, 128, 0.85);
   background-color: rgba(128, 128, 128, 0.12);
@@ -377,9 +441,10 @@ function createButton(doc, session) {
   detachButton(session);
   ensureToggleStyles(doc);
   const button = doc.createElement("button");
-  button.textContent = BUTTON_LABEL;
-  button.title = BUTTON_TITLE;
-  button.setAttribute("aria-label", BUTTON_TITLE);
+  const { label, title } = resolveButtonStrings(doc);
+  button.textContent = label;
+  button.title = title;
+  button.setAttribute("aria-label", title);
   button.type = "button";
   button.className = TOGGLE_CLASS;
   // The Zotero toolbar is a React tree: pointer events are enabled locally so

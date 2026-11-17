@@ -1,36 +1,36 @@
 ---
 name: Bug report
-about: 反馈图表漏检/误检、工具栏按钮异常或显示问题
+about: Report missed/mis-merged figures, toolbar toggle issues, or rendering bugs
 title: "[Bug]: "
 labels: bug
 ---
 
-## 环境信息
+## Environment
 
-- **操作系统**：（例如 Windows 11 / macOS 15 / Ubuntu 24.04）
-- **Zotero 版本**：（例如 10.0.8 / 7.0.x）
-- **Figure Guard 版本**：（可在插件列表或 `probeAll().version` 查看）
+- **OS**: (e.g., Windows 11 / macOS 15 / Ubuntu 24.04)
+- **Zotero Version**: (e.g., 10.0.8 / 7.0.x)
+- **Figure Guard Version**: (shown in Add-ons Manager or `probeAll().version`)
 
-## 问题描述
+## Description
 
-请简要描述发生了什么，以及你期望的行为。
+Briefly describe what happened and what you expected to see.
 
-## 复现步骤
+## Steps to Reproduce
 
-1. 打开哪类 PDF（普通论文 / 扫描件 / 双栏排版等）
-2. 执行了什么操作（切换标签、滚动、缩放、点击「原色」开关等）
-3. 实际看到的现象
+1. PDF type (academic paper / scanned PDF / two-column layout, etc.)
+2. Action taken (switch tabs, scroll, zoom, click `Original` / `原色`, etc.)
+3. Observed behavior
 
-## 诊断信息（可选，排查集成问题时非常有帮助）
+## Diagnostics (optional, very helpful for integration issues)
 
-在 Zotero 中打开 **工具 → 开发者 → Run JavaScript**，运行：
+In Zotero, open **Tools → Developer → Run JavaScript** and run:
 
 ```js
 Zotero.getMainWindow().FigureGuard.probeAll();
 ```
 
 <details>
-<summary>粘贴输出 JSON（如有）</summary>
+<summary>Paste output JSON (if available)</summary>
 
 ```json
 

@@ -11,6 +11,7 @@ push to `main`.
 | --- | --- |
 | `main` | The only long-lived public branch. Source, tests, user-facing docs. Version tags live here. |
 | `feature/*` | Short-lived branch cut from `main` for one feature. Opened as a pull request, merged with CI green, then deleted. |
+| `dev` | Active development integration branch cut from `main`; verified on real Zotero before merging into `main`. |
 | `internal` | Archive of the pre-open-source history, including the internal design notes in `docs/` and the round-by-round log in `reports/`. Not built by CI. |
 
 The work flow for a feature:
@@ -154,7 +155,7 @@ The archive must contain only `manifest.json`, `bootstrap.js`,
 Zotero → Tools → Add-ons → gear icon → **Install Plugin From File…**, then
 confirm the plug-in list shows `Zotero Figure Guard` at version `0.6.0` with
 its icon beside the name, and that the reader toolbar control is the text
-button `原色`.
+button `Original` (or `原色` in Chinese Zotero UI).
 
 ## When a release fails
 

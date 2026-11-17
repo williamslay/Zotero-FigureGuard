@@ -5,10 +5,15 @@ import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 import {
   BUTTON_LABEL,
+  BUTTON_TEXT_EN,
+  BUTTON_TEXT_ZH,
   BUTTON_TITLE,
   getSessions,
+  isChineseLocale,
   maintainButtons,
   probeAll,
+  resolveButtonStrings,
+  resolveZoteroLocale,
   shutdown,
   startup,
 } from "../../src/zotero/main.js";
@@ -37,10 +42,20 @@ const handlers = new Map();
  * own document, which the toggle binds as the `M` target. Null keeps the old
  * shape where there is no main window to bind.
  *
- * @param {{mainWindow?: object|null}} [options]
+ * @param {{mainWindow?: object|null, locale?: string|null, prefs?: Record<string, any>}} [options]
  */
-function installFakeZotero({ mainWindow = null } = {}) {
+function installFakeZotero({ mainWindow = null, locale = "zh-CN", prefs = null } = {}) {
   globalThis.Zotero = {
+    ...(locale !== undefined ? { locale } : {}),
+    ...(prefs
+      ? {
+          Prefs: {
+            get(key) {
+              return prefs[key];
+            },
+          },
+        }
+      : {}),
     debug() {},
     getMainWindow() {
       return mainWindow;
@@ -250,6 +265,73 @@ describe("toolbar toggle: the text button it builds", () => {
     const { button } = render({ withAppendChild: false });
     assert.equal(button.textContent, BUTTON_LABEL, "the name never depended on appendChild");
     assert.equal(button.attributes.get("aria-pressed"), "true", "the state attribute still applies");
+  });
+
+  it("localises the button label: 原色 for Chinese locales, Original for all others", () => {
+    assert.equal(isChineseLocale("zh-CN"), true);
+    assert.equal(isChineseLocale("zh-TW"), true);
+    assert.equal(isChineseLocale("zh_HK"), true);
+    assert.equal(isChineseLocale("zh"), true);
+    assert.equal(isChineseLocale("en-US"), false);
+    assert.equal(isChineseLocale("ja"), false);
+    assert.equal(isChineseLocale(""), false);
+    assert.equal(isChineseLocale(null), false);
+
+    assert.deepEqual(resolveButtonStrings("zh-CN"), BUTTON_TEXT_ZH);
+    assert.deepEqual(resolveButtonStrings("en-US"), BUTTON_TEXT_EN);
+    assert.deepEqual(resolveButtonStrings("fr-FR"), BUTTON_TEXT_EN);
+
+    const prevServices = globalThis.Services;
+    try {
+      // English Zotero UI renders "Original".
+      shutdown();
+      installFakeZotero({ locale: "en-US" });
+      startup({ id: "toggle-locale-test", version: "0.6.0" });
+      const { button: enButton } = render();
+      assert.equal(enButton.textContent, "Original");
+      assert.equal(enButton.title, BUTTON_TEXT_EN.title);
+      assert.equal(enButton.attributes.get("aria-label"), BUTTON_TEXT_EN.title);
+
+      // Non-English, non-Chinese Zotero UI (e.g. Japanese) also falls back to "Original".
+      shutdown();
+      installFakeZotero({ locale: "ja-JP" });
+      startup({ id: "toggle-locale-test", version: "0.6.0" });
+      const { button: jaButton } = render();
+      assert.equal(jaButton.textContent, "Original");
+
+      // Traditional Chinese Zotero UI renders "原色".
+      shutdown();
+      installFakeZotero({ locale: "zh-TW" });
+      startup({ id: "toggle-locale-test", version: "0.6.0" });
+      const { button: twButton } = render();
+      assert.equal(twButton.textContent, "原色");
+      assert.equal(twButton.title, BUTTON_TEXT_ZH.title);
+
+      // Falls back to Services.locale and intl.locale.requested when Zotero.locale is absent.
+      installFakeZotero({ locale: null });
+      globalThis.Services = { locale: { appLocaleAsBCP47: "zh-CN" } };
+      assert.equal(resolveZoteroLocale(), "zh-CN");
+      assert.deepEqual(resolveButtonStrings(), BUTTON_TEXT_ZH);
+
+      globalThis.Services = { locale: { appLocaleAsBCP47: "de-DE" } };
+      assert.deepEqual(resolveButtonStrings(), BUTTON_TEXT_EN);
+
+      delete globalThis.Services;
+      installFakeZotero({ locale: null, prefs: { "intl.locale.requested": "zh-HK" } });
+      assert.equal(resolveZoteroLocale(), "zh-HK");
+      assert.deepEqual(resolveButtonStrings(), BUTTON_TEXT_ZH);
+
+      // Document lang attribute fallback when Zotero/Services expose no locale.
+      installFakeZotero({ locale: null });
+      assert.deepEqual(resolveButtonStrings({ documentElement: { lang: "zh-Hans" } }), BUTTON_TEXT_ZH);
+      assert.deepEqual(resolveButtonStrings({ documentElement: { lang: "en" } }), BUTTON_TEXT_EN);
+    } finally {
+      if (prevServices === undefined) delete globalThis.Services;
+      else globalThis.Services = prevServices;
+      shutdown();
+      installFakeZotero();
+      startup({ id: "toggle-test", version: "0.5.0" });
+    }
   });
 });
 

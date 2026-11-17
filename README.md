@@ -55,7 +55,7 @@ Zotero's built-in dark theme makes reading body text comfortable by inverting th
 - **Selective color restoration**: Overlays original-color canvases on detected figure boxes while preserving Zotero's dark background for body text.
 - **Responsive to reading flow**: Automatically re-renders across scrolling, zooming, page turns, window resizing, and tab switches, prioritizing the active foreground tab and visible pages.
 - **Document-scoped caching**: Caches detected regions by item and document fingerprint so reopening a paper skips re-detection.
-- **One-click toolbar toggle**: Adds a toggle button (`原色`) in the PDF reader toolbar so you can pause or re-enable protection anytime.
+- **One-click toolbar toggle**: Adds a toggle button (`Original` / `原色` depending on Zotero's UI language) in the PDF reader toolbar so you can pause or re-enable protection anytime.
 - **Built-in update support**: Configured with Zotero's add-on update manifest so future releases can be checked and updated directly inside Zotero.
 
 ## Quick Start
@@ -72,7 +72,7 @@ Zotero's built-in dark theme makes reading body text comfortable by inverting th
 ### 2. Usage
 
 - Open any PDF in Zotero under the dark theme: figures on visible pages are automatically restored to their original colors.
-- Click the **`原色`** toggle in the PDF reader toolbar whenever you want to temporarily switch back to the unfiltered dark view.
+- Click the **`Original`** (or **`原色`** in Chinese Zotero UI) toggle in the PDF reader toolbar whenever you want to temporarily switch back to the unfiltered dark view.
 
 ### 3. Updates
 
@@ -104,7 +104,7 @@ No. Figure Guard renders lightweight overlay canvases in the reader view layer o
 <details>
 <summary><b>What if the toolbar toggle disappears after switching tabs, or figures turn gray after long scrolling?</b></summary>
 
-Try toggling the **`原色`** button off and on again or switching tabs. Automatic button re-mounting and off-screen canvas recovery are built in; if you can still reproduce the issue reliably, please open an issue with diagnostics attached.
+Try toggling the **`Original`** / **`原色`** button off and on again or switching tabs. Automatic button re-mounting and off-screen canvas recovery are built in; if you can still reproduce the issue reliably, please open an issue with diagnostics attached.
 
 </details>
 

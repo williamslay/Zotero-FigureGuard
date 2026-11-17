@@ -1,58 +1,58 @@
-# Zotero Figure Guard — 已知问题
+# Zotero Figure Guard — Known Issues
 
-记录当前仍未闭环的问题：现象、已排除项、现有证据、代码状态、下一步判别法。架构与约定见 [AGENTS.md](../AGENTS.md)。
+Tracks open and recently resolved engineering issues: symptoms, ruled-out causes, current evidence, code state, and next verification steps. For architecture and invariants, see [AGENTS.md](../AGENTS.md).
 
-状态标记：**待真机** = 代码已在 `dev` 上改完并通过两级测试，等真机结论；**未解决** = 还没有可靠修法；**未验证** = 已实现但没人跑过。
+Status legend: **Pending real-device** = implemented on `dev` and passing both test tiers, awaiting real-Zotero confirmation; **Open** = no reliable fix yet; **Unverified** = implemented but not yet exercised on real hardware.
 
-真机环境统一为 Zotero 10.0.8 / Windows。
+Real-device verification environment: Zotero 10.0.8 / Windows.
 
-## 1. 工具栏「原色」开关单击不生效 — 已解决（真机已验收）
+## 1. Toolbar Toggle Single-Click Ignored — Resolved (Verified on Real Device)
 
-**根因**：Zotero 阅读器的 `DIV.toolbar` 带有 `-moz-window-dragging: drag`；我们的 `BUTTON.fg-toggle` 设了 `appearance: none` 但未设置 `-moz-window-dragging: no-drag`（计算值为 `default`），导致 Windows 将单击当作标题栏窗口拖拽拦截，`D/W/B/M/I/U` 均未收到按下事件；双击时才漏出 `k1 + p1 = t2`。
+**Root cause**: Zotero's reader `DIV.toolbar` sets `-moz-window-dragging: drag`. Our `BUTTON.fg-toggle` used `appearance: none` without `-moz-window-dragging: no-drag` (computed as `default`), causing Windows to intercept single clicks as titlebar window drags before pointer/mouse events could reach the button; only double-clicks leaked through (`k1 + p1 = t2`).
 
-**修复与清理**：已在 `TOGGLE_CSS` 与内联样式中显式设置 `-moz-window-dragging: no-drag`，并修复 `hitToggle` 对已挂载直接目标的命中（兼容键盘 `(0, 0)` 坐标）。真机已确认单击生效，随后已一并移除临时诊断计数、`span.fg-count` 及多余的跨文档/窗口绑定目标。
+**Fix and cleanup**: Explicitly set `-moz-window-dragging: no-drag` in both `TOGGLE_CSS` and inline styles, and fixed `hitToggle` connected-target matching (including `(0, 0)` keyboard activation). Verified single-click works on real Zotero, then removed temporary diagnostic counters, `span.fg-count`, and redundant cross-window/document bindings.
 
-## 2. 开关节点会丢失，且跨重启与切标签不复原 — 待真机
+## 2. Toolbar Toggle Node Disappears and Does Not Recover Across Restarts / Tab Switches — Pending Real-Device
 
-**现象**：某个 tab（普通 PDF）上开关完全不见，反复关闭并重开 Zotero 多轮、切换标签多轮之后仍是丢失状态；而该 tab 的图表原色功能照常生效。
+**Symptom**: On one tab (regular PDF), the toggle button is completely missing across repeated Zotero restarts and tab switches, while figure color restoration on that same tab continues working normally.
 
-**结论**：会话活着、`renderToolbar` 确实回调过，丢的只是按钮节点。
+**Conclusion**: The session is alive and `renderToolbar` ran; only the mounted button DOM node was lost.
 
-**原因层级**：`renderToolbar` 的容器每次派发前先 `replaceChildren`（zotero/reader `src/common/components/common/custom-sections.js:18`），我们追加的节点随之清空；该事件每个 reader 文档只派发一次。我们的 `append` 是同步的，所以不是 `append` 抛错，而是节点被清空之后没有任何机制再补挂——此前唯一的回归路径是下一次 `renderToolbar`。
+**Underlying mechanism**: The `renderToolbar` container calls `replaceChildren()` before each dispatch (`zotero/reader` `src/common/components/common/custom-sections.js:18`), clearing previously appended nodes, and the event only fires once per reader document. Our `append()` call is synchronous so it does not throw; once cleared, there was previously no repair path until another `renderToolbar`.
 
-**代码状态**：`dev` 上 `6d615ce` 新增 `maintainButtons()`（`src/zotero/main.js:334`），由 `wakeTabSessions` 调用（不新增监听器、不新增定时器）。重挂条件：`link.button.isConnected === false` 且该 toolbar document 内没有我们的 `.fg-toggle`；优先 `link.parent.appendChild`（父节点仍在文档时），否则退回本次 render 记录的 `append` 回调，两者都失败则 `warnOnce("button-reattach", …)`。`probeAll()` 每条会话新增 `button: {mounted, hasParent, hasAppend}`。
+**Code state**: `maintainButtons()` (`src/zotero/main.js`, commit `6d615ce`) is invoked from `wakeTabSessions` without adding timers or listeners. Re-mount condition: `link.button.isConnected === false` and the toolbar document currently contains no `.fg-toggle`. It prefers `link.parent.appendChild(node)` when the parent is still connected, falling back to the saved bound `append(node)` callback, and calls `warnOnce("button-reattach", …)` if both fail. `probeAll()` now includes `button: {mounted, hasParent, hasAppend}` per session.
 
-**下一步判别法**：切到那个 tab 看开关是否回来；若仍不见，看 `probeAll()` 里该会话的 `button.mounted` / `hasParent` / `hasAppend`，并找控制台里的 `button-reattach` 日志。
+**Next verification step**: Switch to the affected tab to see if the toggle reappears; if still missing, inspect `button.mounted` / `hasParent` / `hasAppend` in `probeAll()` and check the console for `button-reattach`.
 
-## 3. 滚动一段时间后图表重新变灰 — 待真机
+## 3. Figures Turn Gray Again After Scrolling — Pending Real-Device
 
-**现象**：开启后图表恢复原色，但上下滚动一段时间，所有图表又变回暗黑模式下的灰色；关掉再打开开关可以恢复。变灰时图表位置与大小正常，说明区域缓存没问题，是覆盖层 canvas 掉了出去。
+**Symptom**: Figures restore their original colors initially, but after scrolling up and down for a while they revert to dark-mode gray; toggling the button off and back on restores them. Bounding boxes remain accurate when gray, indicating the region cache is intact and overlay canvases were detached.
 
-**原因**：阅读器滚动时 Zotero 会回收并重建 pageView，挂在旧 `pageView.div` 里的 canvas 随之离开文档；而稳定重绘检查过去只看视口几何（`geometryStale()`），几何没变就跳过这一页，记录仍写着 painted，却没人重挂 canvas。
+**Cause**: Zotero recycles and recreates `pageView` elements during scrolling, taking any canvas mounted inside the old `pageView.div` out of the document. Previously, the settled repaint check only tested `geometryStale()`, skipping pages whose viewport hadn't changed even though the overlay canvas was no longer connected.
 
-**代码状态**：`dev` 上已改为几何变化、或 canvas 已不在文档（`isMounted()` 为 false）两种情况都重绘，并走 `attachPageNumber()` 把记录重绑到活的 pageView。触发仍依赖已有的 `pagerendered` 与开关、文档切换等站点，没有新增监听器或定时器。
+**Code state**: Settled repaint checks now trigger whenever either `geometryStale()` **or** `!isMounted()` is true, rebinding via `attachPageNumber()` onto the live `pageView`. Triggering still relies on existing `pagerendered`, toggle, and document-switch hooks with no added timers or listeners.
 
-**待真机确认两点**：滚动过程中是否仍能看见灰→色的恢复延迟；是否存在完全不触发 `pagerendered` 的页面回收路径（那种情况下稳定检查不会被 arm，仍需别的触发点）。
+**Two points to confirm on real device**: Whether any brief gray-to-color delay is noticeable while scrolling, and whether there is any `pageView` recycling path that never fires `pagerendered`.
 
-## 4. 首次恢复延迟与多标签并发 — 待真机（本轮已改调度）
+## 4. Initial Restoration Latency and Multi-Tab Concurrency — Pending Real-Device (Rescheduled)
 
-此前 `repaintAttached()` 与 `onViewScaleChange()` 会用 `Promise.all` 把整篇 PDF 的所有页面并发全跑，且后台标签也会在 `start()` / `recoveryPass()` / `pagerendered` 中直接执行检测与渲染，导致打开新标签时首屏可见页被全篇以及后台页签抢占。本轮已改为仅前台执行（`isForeground()` + 切走即 `pauseBackgroundWork()`）、按 `currentPageNumber` 距离动态优先串行调度，并对同页 `detect()` 与 `inFlightPaint` 去重，待真机验证首屏变色速度与按钮响应性。
+Previously `repaintAttached()` and `onViewScaleChange()` ran all pages concurrently via `Promise.all`, and background tabs executed detection/rendering directly inside `start()`, `recoveryPass()`, and `pagerendered`, starving the visible viewport on newly opened tabs. Scheduling now enforces foreground-only execution (`isForeground()` + `pauseBackgroundWork()` on tab blur), dynamic serial priority ordered by distance from `currentPageNumber`, and per-page `detect()` / `inFlightPaint` deduplication. Needs real-device verification for first-screen speed and button responsiveness.
 
-## 5. 文档计数漂移 — 已同步
+## 5. Test Count Synchronization — Synced
 
-自动更新清单与测试补齐后，[DEVELOPMENT.md](./DEVELOPMENT.md) 与 [AGENTS.md](../AGENTS.md) 的用例数已同步为 431（CI 级）与 513（完整回归）。此后每次改动测试都要一并更新这两处。
+After adding the auto-update manifest tests and locale toggle tests, counts in [DEVELOPMENT.md](./DEVELOPMENT.md) and [AGENTS.md](../AGENTS.md) are synced to `432` (CI tier) and `514` (full regression). Keep both updated whenever tests are added or removed.
 
-## 6. 未验证项清单
+## 6. Unverified Items Checklist
 
-- Release 工作流「Release 已存在」的守卫分支从没真正跑过（只有一个线上 Release）。
-- 插件列表里的图标渲染未真机确认（`manifest.json` 的 `icons` 指向 `content/figureguard-icon.svg`）。
-- HiKV 的图 7/8/9 检测效果未逐张核对。
-- `probeAll()` 在真机上的完整字段（含新增的 `button`）未跑过。
-- GitHub 仓库设置未确认：Settings → Actions → Workflow permissions 是否为 `contents: read`；Artifact 保留天数；`main` 上没有分支保护。
-- 仓库 About 的描述与 topics 未填。
+- The "release already exists" guard branch in the Release workflow has not yet been triggered in practice.
+- Add-on list icon rendering on real hardware (`manifest.json` `icons` pointing to `content/figureguard-icon.svg`).
+- Page-by-page verification of HiKV figures 7/8/9.
+- Full `probeAll()` output inspection on real Zotero including the new `button` fields.
+- Repository GitHub settings verification: Actions workflow permissions (`contents: read`), artifact retention days, and `main` branch protection.
+- Repository GitHub About description and topics.
 
-## 7. 检测覆盖的已知边界
+## 7. Known Detection Coverage Boundaries
 
-- 规则按学术 PDF 的常见图表形态调校：矢量路径、Form XObject、双栏排版。纯位图扫描件与特殊着色方式尚未覆盖。
-- 图注与图相隔较远的排版、并排小图各自成带等边界情形，仍会漏检或并错。
-- Zotero 大版本升级后 pdf.js 的内部结构可能变化，排查入口是 `probeAll()` 的字段。
+- Tuned for standard academic PDF layouts (vector paths, Form XObjects, two-column papers). Purely scanned bitmap PDFs and unusual shading/masking pipelines are not yet covered.
+- Distant captions or independent side-by-side strip subfigures can still be missed or merged imperfectly.
+- Major Zotero upgrades may change internal `pdf.js` structures; `probeAll()` is the primary diagnostic entry point.
