@@ -12,6 +12,17 @@
               "strict_max_version": "10.9.9"
             }
           }
+        },
+        {
+          "version": "0.6.1",
+          "update_link": "https://github.com/williamslay/Zotero-FigureGuard/releases/download/v0.6.1/zotero-figure-guard-0.6.1.xpi",
+          "update_hash": "sha256:3678377ed53d91e5b4bf6f217de8486587ff61ffb05c9a6796f7a0f959d212e7",
+          "applications": {
+            "zotero": {
+              "strict_min_version": "6.999",
+              "strict_max_version": "10.9.9"
+            }
+          }
         }
       ]
     }
