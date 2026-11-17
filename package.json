@@ -1,6 +1,6 @@
 {
   "name": "zotero-figure-guard",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "Zotero Figure Guard — keeps figures in their original colours inside the dark-theme PDF reader",
   "type": "module",
