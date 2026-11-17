@@ -1,0 +1,19 @@
+{
+  "addons": {
+    "figure-guard@zotero.org": {
+      "updates": [
+        {
+          "version": "0.6.0",
+          "update_link": "https://github.com/williamslay/Zotero-FigureGuard/releases/download/v0.6.0/zotero-figure-guard-0.6.0.xpi",
+          "update_hash": "sha256:a8e716f56114f27a2da59e0d3b4449ee067eab707737aa1dc46ccc5d8068ff19",
+          "applications": {
+            "zotero": {
+              "strict_min_version": "6.999",
+              "strict_max_version": "10.9.9"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
