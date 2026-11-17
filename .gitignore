@@ -8,9 +8,11 @@ reports/
 
 # Internal working documents
 # (tracked on the dev branch, ignored on the public main branch).
-# RELEASING.md is the one document published on main.
+# Only published developer docs in docs/ are tracked on main.
 docs/*
 !docs/RELEASING.md
+!docs/DEVELOPMENT.md
+!docs/KNOWN_ISSUES.md
 
 # Copyrighted test papers and their reference renders: not redistributed
 fixture/*.pdf

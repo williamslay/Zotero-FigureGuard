@@ -1,6 +1,6 @@
 # Zotero Figure Guard — Agent 指南
 
-Zotero Figure Guard 是 Zotero 7–10 的 PDF 阅读器扩展。深色主题下，Zotero 原生 PDF 阅读器把整页反色，彩色图表跟着变成灰白轮廓；本扩展自动检测页面中的图表区域，只把这些区域恢复为 PDF 的原始颜色，其余部分保持深色。它不修改 PDF 文件，不依赖 Reading Mode，不改变 Zotero 的排版。本文件面向在本仓库工作的 AI 编码代理与维护者，记录模块架构、运行时事实、分支模型、版本策略与测试层级。当前已知问题见 [knownissue.md](./knownissue.md)，发布步骤见 [docs/RELEASING.md](./docs/RELEASING.md)。
+Zotero Figure Guard 是 Zotero 7–10 的 PDF 阅读器扩展。深色主题下，Zotero 原生 PDF 阅读器把整页反色，彩色图表跟着变成灰白轮廓；本扩展自动检测页面中的图表区域，只把这些区域恢复为 PDF 的原始颜色，其余部分保持深色。它不修改 PDF 文件，不依赖 Reading Mode，不改变 Zotero 的排版。本文件面向在本仓库工作的 AI 编码代理与维护者，记录模块架构、运行时事实、分支模型、版本策略与测试层级。当前已知问题见 [docs/KNOWN_ISSUES.md](./docs/KNOWN_ISSUES.md)，发布步骤见 [docs/RELEASING.md](./docs/RELEASING.md)，源码构建与本地排查见 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)。
 
 ## 分层与模块
 
@@ -98,7 +98,7 @@ Zotero Figure Guard 是 Zotero 7–10 的 PDF 阅读器扩展。深色主题下�
 ## 两级测试
 
 - `npm run test:ci` — 公开 CI 级，不需要受版权保护的 PDF。只跑不碰真实 PDF 的测试文件（当前 18 个文件、431 个用例），全部实际执行并通过，结果里 `cancelled` 必须为 0。GitHub Actions 的 CI 就是这一级。
-- `npm test`（等价于 `npm run test:fixture`）— 维护者本地的完整回归级，当前 25 个文件、513 个用例。检测层的回归基线取自 5 篇论文的 PDF，这些 PDF 受版权保护、不随仓库分发，需要自行放到 README「运行测试」一节列出的路径。缺少这些 PDF 时，依赖真实 PDF 的 79 个用例会取消（cancelled）而不是通过，所以完整回归只在维护者本地跑，不作为公开 CI 的强制门槛。
+- `npm test`（等价于 `npm run test:fixture`）— 维护者本地的完整回归级，当前 25 个文件、513 个用例。检测层的回归基线取自 5 篇论文的 PDF，这些 PDF 受版权保护、不随仓库分发，需要自行放到 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)「运行测试」一节列出的路径。缺少这些 PDF 时，依赖真实 PDF 的 79 个用例会取消（cancelled）而不是通过，所以完整回归只在维护者本地跑，不作为公开 CI 的强制门槛。
 
 规范命令是 `npm test`；直接跑裸 `node --test` 会有一次伪失败。检测基线（已接受区域数）：PipeBWrite 18、FluidKV 18、Flash 10、Borges 9，另有 HiKV fixture。改 `src/core/` 任何阈值都要跑 `npm test` 并核对这组数字。
 
