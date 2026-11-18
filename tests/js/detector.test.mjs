@@ -11,6 +11,9 @@ function form(rect, extra = {}) {
 function image(rect, extra = {}) {
   return { kind: "image", rect, depth: 0, opIndex: 0, ...extra };
 }
+function path(rect, extra = {}) {
+  return { kind: "path", rect, depth: 0, opIndex: 0, ...extra };
+}
 /** Caption placed `gap` points below `figureBottom`. */
 function captionBelow(number, figureRect, gap = 8, widthOverride = null) {
   const width = widthOverride ?? 150;
@@ -311,10 +314,11 @@ describe("detector: vector path placements", () => {
     return { kind: "path", rect, depth: 0, opIndex: 0, ...extra };
   }
 
-  it("chains nearby path boxes into one cluster", () => {
+  it("chains nearby path boxes into one cluster on a figure page", () => {
+    const otherCaption = captionBelow("9", [400, 120, 520, 200], 8);
     const result = detectFigureRegions({
       placements: [path([50, 600, 150, 700]), path([160, 600, 260, 700])],
-      captions: [],
+      captions: [otherCaption],
       pageRect: PAGE,
     });
     assert.equal(result.regions.length, 1);
@@ -323,13 +327,24 @@ describe("detector: vector path placements", () => {
     assert.ok(result.regions[0].evidence.includes("standalone-path"));
   });
 
-  it("keeps path boxes beyond the merge tolerance apart", () => {
+  it("keeps path boxes beyond the merge tolerance apart on a figure page", () => {
+    const otherCaption = captionBelow("9", [400, 120, 520, 200], 8);
     const result = detectFigureRegions({
       placements: [path([50, 600, 150, 700]), path([185, 600, 285, 700])],
-      captions: [],
+      captions: [otherCaption],
       pageRect: PAGE,
     });
     assert.equal(result.regions.length, 2);
+  });
+
+  it("rejects unanchored path clusters on pages without any Figure caption", () => {
+    const result = detectFigureRegions({
+      placements: [path([50, 600, 260, 700])],
+      captions: [],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 0);
+    assert.equal(result.rejected.at(-1).reason, "no-figure-caption-on-page");
   });
 
   it("rejects a small path cluster below the anchored-area gate", () => {
@@ -881,5 +896,198 @@ describe("detector: absorption of area-rejected placements", () => {
     assert.equal(result.regions.length, 1);
     assert.deepEqual(result.regions[0].rect, figure);
     assert.ok(result.rejected.some((r) => r.reason === "image-below-area-threshold"));
+  });
+});
+
+describe("detector: Zotero-aligned edge, table-guard, substrate, and mixed-image refinement", () => {
+  it("keeps adjacent-column booktabs table rules separate from a nearby right-column figure", () => {
+    const rightFig = [320.4, 484.5, 560.5, 590.1];
+    const result = detectFigureRegions({
+      placements: [
+        // Left-column booktabs table rules + small cell grid (`onlyThinRules` must survive mergePanelGrids)
+        path([62.9, 719.8, 285.3, 720.8]),
+        path([63.1, 707.6, 64.1, 719.6]),
+        path([285.1, 707.6, 286.1, 719.6]),
+        path([62.9, 646.1, 285.3, 647.1]),
+        path([54, 612.8, 307.8, 613.8]),
+        path([54, 600.5, 307.8, 601.5]),
+        path([54, 528.4, 307.8, 529.4]),
+        // Right-column figure across a 12.6 pt two-column gutter (< 25 pt merge tolerance)
+        form(rightFig),
+        path(rightFig),
+        path([347.7, 495, 549.6, 575.4]),
+      ],
+      captions: [captionBelow("14", rightFig, 8)],
+      textItems: [
+        { str: "Workload", rect: [87.6, 604.3, 126.7, 614.2] },
+        { str: "F (Read-Modify-Write)", rect: [60, 532.1, 154.3, 542.1] },
+        { str: "Table 2: YCSB workloads.", rect: [114.2, 511, 233.6, 523] },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 1);
+    assert.deepEqual(result.regions[0].rect, rightFig);
+  });
+
+  it("prevents 1D horizontal table rules separated by text from chaining into a figure", () => {
+    const result = detectFigureRegions({
+      placements: [
+        path([54, 697, 558, 698]),
+        path([54, 670, 558, 671]),
+        path([54, 623, 558, 624]),
+        path([54, 590, 558, 591]),
+      ],
+      textItems: [
+        { str: "Method", rect: [60, 680, 110, 690] },
+        { str: "Throughput", rect: [200, 680, 270, 690] },
+        { str: "Baseline", rect: [60, 640, 110, 650] },
+        { str: "Ours", rect: [60, 600, 95, 610] },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 0);
+  });
+
+  it("filters tiled page-substrate raster backgrounds without swallowing figures", () => {
+    const result = detectFigureRegions({
+      placements: [
+        image([0, 0, 612, 400]),
+        image([0, 399, 612, 792]),
+        form([100, 500, 300, 650]),
+      ],
+      captions: [captionBelow("1", [100, 500, 300, 650])],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 1);
+    assert.deepEqual(result.regions[0].rect, [100, 500, 300, 650]);
+  });
+
+  it("merges raster image with surrounding vector axes in clear sight, blocked by prose", () => {
+    const merged = detectFigureRegions({
+      placements: [
+        image([100, 520, 260, 660]),
+        path([94, 520, 95, 660]),
+        path([94, 514, 260, 515]),
+      ],
+      captions: [captionBelow("2", [94, 514, 260, 660])],
+      pageRect: PAGE,
+    });
+    assert.equal(merged.regions.length, 1);
+    assert.deepEqual(merged.regions[0].rect, [94, 514, 260, 660]);
+    assert.deepEqual(merged.regions[0].sourceKinds, ["image", "path"]);
+  });
+
+  it("expands 4 ways onto left/right Y-axis labels and bottom subfigure labels on two-column plots", () => {
+    const result = detectFigureRegions({
+      placements: [path([110, 540, 510, 710])],
+      captions: [
+        {
+          number: "7",
+          label: "Figure 7:",
+          text: "Figure 7: Two-column benchmark results.",
+          rect: [180, 488, 420, 498],
+          fontSize: 10,
+        },
+      ],
+      textItems: [
+        { str: "Throughput (M ops/s)", rect: [94, 580, 102, 660], transform: [0, 6, -6, 0, 94, 580] },
+        { str: "NVM write latency (ns)", rect: [240, 524, 340, 532], transform: [8, 0, 0, 8, 240, 524] },
+        { str: "(a) Put", rect: [150, 508, 190, 516], transform: [8, 0, 0, 8, 150, 508] },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 1);
+    assert.deepEqual(result.regions[0].rect, [94, 508, 510, 710]);
+  });
+
+  it("accepts wide-short standalone images under the 2-of-3 Zotero size gate", () => {
+    // 400 x 18 pt? No: 400 x 21 is < 8% height. 120 x 70 = 8400/484704 = 0.0173 (< 0.02),
+    // width ratio 120/612 = 0.196 (>= 0.15) and height ratio 70/792 = 0.088 (>= 0.08) -> passes 2-of-3.
+    const result = detectFigureRegions({
+      placements: [image([100, 500, 220, 570])],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 1);
+    assert.deepEqual(result.regions[0].rect, [100, 500, 220, 570]);
+  });
+
+  it("coalesces dense micro-paths inside plots so later figures past maxPathBoxesPerPage are not truncated", () => {
+    const firstFrame = [60, 620, 280, 720];
+    const dots = Array.from({ length: 1300 }, (_, i) =>
+      path([80 + (i % 150), 630 + ((i * 7) % 80), 81.2 + (i % 150), 631.2 + ((i * 7) % 80)]),
+    );
+    const secondFig = [320, 620, 550, 725];
+    const result = detectFigureRegions({
+      placements: [path(firstFrame), ...dots, path(secondFig)],
+      captions: [captionBelow("1", firstFrame, 8), captionBelow("2", secondFig, 8)],
+      pageRect: PAGE,
+    });
+    assert.equal(result.diagnostics.pathBoxesTruncated, 0);
+    assert.equal(result.regions.length, 2);
+    assert.deepEqual(
+      result.regions.map((r) => r.captionNumber),
+      ["2", "1"],
+    );
+  });
+
+  it("stitches an unanchored upper architecture sub-band across a ~20 pt label gap onto the captioned figure", () => {
+    const lowerBand = [60, 596, 280, 647];
+    const upperBand = [74, 667, 292, 704];
+    const result = detectFigureRegions({
+      placements: [path(lowerBand), path(upperBand)],
+      captions: [captionBelow("3", lowerBand, 8)],
+      textItems: [
+        { str: "Fast Disk", rect: [55, 648, 88, 657], transform: [8, 0, 0, 8, 55, 648] },
+        { str: "Access key user12345", rect: [62, 712, 150, 722], transform: [8, 0, 0, 8, 62, 712] },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 1);
+    assert.equal(result.regions[0].captionNumber, "3");
+    assert.deepEqual(result.regions[0].rect, [55, 596, 292, 722]);
+  });
+
+  it("keeps edge-straddling labels and rotated Y-axis overhangs unchopped", () => {
+    const box = [80, 600, 280, 700];
+    const result = detectFigureRegions({
+      placements: [form(box)],
+      captions: [captionBelow("1", box, 8)],
+      textItems: [
+        // Rotated Y-axis label extending 10 pt past top border and straddling label extending 6 pt above
+        { str: "Throughput (req/sec)", rect: [62, 604, 70, 710], transform: [0, 6, -6, 0, 62, 604] },
+        { str: "Header tag", rect: [140, 696, 200, 706], transform: [8, 0, 0, 8, 140, 696] },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 1);
+    assert.deepEqual(result.regions[0].rect, [62, 600, 280, 710]);
+  });
+
+  it("does not chain 8 pt table header shading bars in mergePanelGrids", () => {
+    const result = detectFigureRegions({
+      placements: [
+        path([45.8, 149.4, 440.2, 157.4]),
+        path([45.8, 104.4, 440.2, 112.4]),
+      ],
+      textItems: [
+        { str: "Table 1. Research Questions", rect: [88.5, 627.6, 397.3, 636.6] },
+        { str: "Question#4: Evolution", rect: [50.8, 135, 250, 142] },
+      ],
+      pageRect: [0, 0, 486, 720],
+    });
+    assert.equal(result.regions.length, 0);
+  });
+
+  it("rejects an unanchored path block sitting directly under a Table caption even on a figure page", () => {
+    const result = detectFigureRegions({
+      placements: [path([320, 200, 560, 400])],
+      captions: [captionBelow("2", [54, 500, 290, 650], 8)],
+      textItems: [
+        { str: "Table 1. Summary of approaches", rect: [320, 620, 560, 630] },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 0);
+    assert.ok(result.rejected.some((r) => r.reason === "table-or-algorithm-region"));
   });
 });

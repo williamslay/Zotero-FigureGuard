@@ -104,7 +104,7 @@ describe("borges fixture: whole document survey", () => {
     // `page-sized`, so page 12 yields nothing at all.
     const page12 = survey[11];
     assert.equal(page12.pathBoxesOffPage, 15, "15 boxes dropped");
-    assert.equal(page12.pathBoxes, 72, "page 12 does carry 72 raw vector boxes");
+    assert.equal(page12.pathBoxes, 72, "page 12 carries 72 raw vector boxes");
     assert.equal(page12.pathClusters, 2, "the two figure bands end up as two clusters");
   });
 
@@ -176,8 +176,9 @@ describe("borges fixture: whole document survey", () => {
     const page13 = survey[12];
     assert.equal(page13.pathBoxesOffPage, 0);
     assert.equal(page13.pathClusterSplits, 0);
+    // Page 13 expands figure 13 upward to capture the full rotated Y-axis label.
     assert.deepEqual(page13.accepted, [
-      { rect: [54, 72, 294.05, 127.62], caption: "13", kind: "path", confidence: 0.9, pageAreaRatio: 0.0275 },
+      { rect: [54, 59.89, 294.05, 127.62], caption: "13", kind: "path", confidence: 0.9, pageAreaRatio: 0.0335 },
       { rect: [317.96, 72, 558, 166.15], caption: "14", kind: "path", confidence: 0.9, pageAreaRatio: 0.0466 },
     ]);
     assert.deepEqual(page13.uncoveredCaptions, []);
@@ -190,15 +191,14 @@ describe("borges fixture: whole document survey", () => {
     const splits = pathCounters.flatMap((c, index) =>
       c.splits && index !== 11 ? [`page ${index + 1} split ${c.splits}`] : [],
     );
-    // The text growth is a no-op on this document: its axis labels are painted
-    // paths rather than text runs, so no text item ever sits outside an accepted
-    // border with its baseline in the figure's band.
+    // 4-way clear-sight expansion pulls diagram headers ("Data plane",
+    // "Control plane") on page 2 and diagram labels on page 8 into their figures.
     const grown = pathCounters.flatMap((c, index) =>
       c.expanded ? [`page ${index + 1} grew ${c.expanded}`] : [],
     );
     assert.deepEqual(offPage, []);
     assert.deepEqual(splits, []);
-    assert.deepEqual(grown, []);
+    assert.deepEqual(grown, ["page 2 grew 1", "page 8 grew 1", "page 13 grew 1"]);
   });
 
   it("finds no caption row left inside any accepted region", () => {

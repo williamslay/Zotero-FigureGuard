@@ -380,6 +380,47 @@ function detachButton(session) {
  *
  * @returns {number} How many toggles this pass put back.
  */
+/**
+ * Mounts the toolbar toggle directly into an already-open reader's toolbar when
+ * the add-on is installed or updated after `renderToolbar` has already fired.
+ * Because `zotero/reader`'s toolbar `useEffect` only fires `renderToolbar` once
+ * per opened document, `syncOpenReaders` and `maintainButtons` use this fallback
+ * so live tabs get the switch immediately alongside their restored colors.
+ *
+ * @param {object} reader
+ * @param {ReaderSession} session
+ * @returns {boolean} Whether a button was mounted.
+ */
+function ensureButtonForOpenReader(reader, session) {
+  if (!reader || !session || session.destroyed) return false;
+  const existingLink = buttonLinks.get(session);
+  if (existingLink?.button?.isConnected) return false;
+  const doc = reader?._iframeWindow?.document ?? null;
+  if (!doc?.createElement || typeof doc.querySelector !== "function") return false;
+  const existingToggles = Array.from(doc.querySelectorAll?.(`.${TOGGLE_CLASS}`) ?? []);
+  const liveOwned = new Set(Array.from(buttonLinks.values(), (l) => l.button));
+  if (existingToggles.some((el) => liveOwned.has(el))) return false;
+  const container =
+    doc.querySelector(".toolbar .custom-sections") ??
+    doc.querySelector(".custom-sections") ??
+    doc.querySelector(".toolbar .end") ??
+    doc.querySelector(".toolbar");
+  if (!container?.appendChild) return false;
+  for (const stale of existingToggles) {
+    try {
+      stale?.parentNode?.removeChild?.(stale);
+    } catch (ignored) {}
+  }
+  const button = createButton(doc, session);
+  container.appendChild(button);
+  const link = buttonLinks.get(session);
+  if (link) {
+    link.toolbarDoc = doc;
+    link.parent = button.parentNode ?? container;
+  }
+  return true;
+}
+
 export function maintainButtons() {
   let remounted = 0;
   for (const link of Array.from(buttonLinks.values())) {
@@ -402,6 +443,16 @@ export function maintainButtons() {
       warnOnce("button-reattach", err);
     }
   }
+  for (const [reader, entry] of Array.from(sessions.entries())) {
+    try {
+      const session = entry?.session;
+      if (!session || session.destroyed) continue;
+      if (buttonLinks.has(session)) continue;
+      if (ensureButtonForOpenReader(reader, session)) remounted += 1;
+    } catch (err) {
+      warnOnce("button-open-mount", err);
+    }
+  }
   return remounted;
 }
 
@@ -413,7 +464,11 @@ export function maintainButtons() {
  */
 function ensureToggleStyles(doc) {
   try {
-    if (typeof doc.getElementById === "function" && doc.getElementById(TOGGLE_STYLE_ID)) return;
+    const existing = typeof doc.getElementById === "function" ? doc.getElementById(TOGGLE_STYLE_ID) : null;
+    if (existing) {
+      existing.textContent = TOGGLE_CSS;
+      return;
+    }
     const head = doc.head ?? doc.querySelector?.("head") ?? doc.documentElement;
     if (!head) return;
     const style = doc.createElement("style");
@@ -725,7 +780,16 @@ function syncOpenReaders() {
         } catch (err) {
           warnOnce("get-by-tab-id", err);
         }
-        if (reader) ensureSession(reader);
+        if (reader) {
+          const session = ensureSession(reader);
+          if (session) {
+            try {
+              ensureButtonForOpenReader(reader, session);
+            } catch (err) {
+              warnOnce("sync-open-reader-button", err);
+            }
+          }
+        }
       }
     }
   } catch (err) {

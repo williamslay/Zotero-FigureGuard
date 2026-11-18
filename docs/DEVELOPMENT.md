@@ -9,10 +9,11 @@ bootstrap.js                 XPI bootstrap entry point (chrome sandbox)
 manifest.json                Add-on manifest: ID, version, compatibility range, update_url
 src/
   core/                      Pure JS detection layer (no Zotero dependency; runs directly in Node)
-    detector.js              pdf.js getOperatorList() -> per-page figure bounding boxes
+    detector.js              pdf.js getOperatorList() + text blockers -> per-page figure boxes
     detector-options.js      Thresholds and detection feature flags
+    text-layout.js           Prose/caption sight blockers, substrate filter, 4-way label growth
     captions.js              Caption-to-figure pairing
-    placements.js            XObject / image placement mapping to page coordinates
+    placements.js            XObjects, inline/mask images, shading, clip paths, and path mapping
     cache.js                 Document-scoped region cache keyed by item + document fingerprint
     pdf-source.js            Document fingerprint and document-level extraction
     render.js / viewport.js / geom.js
@@ -76,7 +77,7 @@ Tests are organized into two tiers.
 npm run test:ci
 ```
 
-Runs only the PDF-free test files (currently 18 files, 432 tests). All tests must execute and pass with `cancelled: 0`. This is the exact gate run by GitHub Actions CI.
+Runs only the PDF-free test files (currently 18 files, 449 tests). All tests must execute and pass with `cancelled: 0`. This is the exact gate run by GitHub Actions CI.
 
 ### Level 2 — Full Fixture Regression (requires local PDFs)
 
@@ -84,7 +85,7 @@ Runs only the PDF-free test files (currently 18 files, 432 tests). All tests mus
 npm test              # equivalent to npm run test:fixture
 ```
 
-Runs the full maintainer suite (currently 25 files, 514 tests). Detection baselines rely on five academic paper PDFs that are copyrighted and not redistributed in this repository. Place them locally at the following paths (the first four at the repository root, the last one under `fixture/`):
+Runs the full maintainer suite (currently 25 files, 531 tests). Detection baselines rely on five academic paper PDFs that are copyrighted and not redistributed in this repository. Place them locally at the following paths (the first four at the repository root, the last one under `fixture/`):
 
 ```text
 Borges_ A Low-Latency Distributed Shared Log on a CXL Memory_SSD Hybrid.pdf

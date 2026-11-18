@@ -692,6 +692,144 @@ describe("toolbar toggle: putting a lost toggle back", () => {
   });
 });
 
+describe("toolbar toggle: mounting on already-open readers across install/update", () => {
+  function openReaderFixture({ withContainer = true } = {}) {
+    const doc = fakeDoc();
+    const toolbar = doc.createElement("div");
+    toolbar.className = "toolbar";
+    const end = doc.createElement("div");
+    end.className = "end";
+    const customSections = doc.createElement("div");
+    customSections.className = "custom-sections";
+    if (withContainer) {
+      end.appendChild(customSections);
+      toolbar.appendChild(end);
+      doc.appendChild(toolbar);
+    }
+    doc.querySelector = (selector) => {
+      if (selector === ".toolbar .custom-sections") {
+        return toolbar.isConnected && customSections.isConnected ? customSections : null;
+      }
+      if (selector === ".custom-sections") return customSections.isConnected ? customSections : null;
+      if (selector === ".toolbar .end") return toolbar.isConnected && end.isConnected ? end : null;
+      if (selector === ".toolbar") return toolbar.isConnected ? toolbar : null;
+      return null;
+    };
+    const reader = {
+      tabID: "tab-open-1",
+      _iframeWindow: { document: doc },
+    };
+    return { doc, toolbar, customSections, reader };
+  }
+
+  it("mounts the toggle into .custom-sections immediately on startup without renderToolbar", () => {
+    shutdown();
+    handlers.clear();
+    const { customSections, reader } = openReaderFixture();
+    globalThis.Zotero = {
+      locale: "zh-CN",
+      debug() {},
+      getMainWindow() {
+        return null;
+      },
+      getMainWindows() {
+        return [
+          {
+            Zotero: {
+              Reader: {
+                _readers: [{ tabID: reader.tabID, reader }],
+                getByTabID(id) {
+                  return id === reader.tabID ? reader : null;
+                },
+              },
+            },
+          },
+        ];
+      },
+      Reader: {
+        registerEventListener(type, handler) {
+          handlers.set(type, handler);
+        },
+        unregisterEventListener(type) {
+          handlers.delete(type);
+        },
+        getByTabID(id) {
+          return id === reader.tabID ? reader : null;
+        },
+      },
+    };
+
+    startup();
+    assert.equal(customSections.children.length, 1, "mounted immediately on startup");
+    assert.equal(customSections.children[0].className, "fg-toggle");
+    assert.equal(customSections.children[0].textContent, BUTTON_TEXT_ZH.label);
+    assert.equal(probeAll().sessions[0].button.mounted, true);
+
+    // Simulating an add-on update: shutdown() detaches old node, next startup() mounts a fresh one cleanly.
+    shutdown();
+    assert.equal(customSections.children.length, 0, "shutdown detaches old toggle");
+    startup();
+    assert.equal(customSections.children.length, 1, "update startup remounts exactly one fresh toggle");
+    assert.equal(probeAll().sessions[0].button.mounted, true);
+    shutdown();
+  });
+
+  it("mounts an unlinked open session via maintainButtons once .custom-sections becomes ready", () => {
+    shutdown();
+    handlers.clear();
+    const { doc, toolbar, end, customSections, reader } = (() => {
+      const fx = openReaderFixture({ withContainer: false });
+      const end = fx.doc.createElement("div");
+      end.className = "end";
+      return { ...fx, end };
+    })();
+    globalThis.Zotero = {
+      locale: "en-US",
+      debug() {},
+      getMainWindow() {
+        return null;
+      },
+      getMainWindows() {
+        return [
+          {
+            Zotero: {
+              Reader: {
+                _readers: [{ tabID: reader.tabID, reader }],
+                getByTabID(id) {
+                  return id === reader.tabID ? reader : null;
+                },
+              },
+            },
+          },
+        ];
+      },
+      Reader: {
+        registerEventListener(type, handler) {
+          handlers.set(type, handler);
+        },
+        unregisterEventListener(type) {
+          handlers.delete(type);
+        },
+        getByTabID(id) {
+          return id === reader.tabID ? reader : null;
+        },
+      },
+    };
+
+    startup();
+    assert.equal(customSections.children.length, 0, "no container yet at startup");
+    end.appendChild(customSections);
+    toolbar.appendChild(end);
+    doc.appendChild(toolbar);
+
+    assert.equal(maintainButtons(), 1, "maintainButtons mounts the missing toggle once container exists");
+    assert.equal(customSections.children.length, 1);
+    assert.equal(customSections.children[0].textContent, BUTTON_TEXT_EN.label);
+    assert.equal(maintainButtons(), 0, "subsequent calls do not double-mount");
+    shutdown();
+  });
+});
+
 describe("toolbar toggle: the stylesheet behind the states", () => {
   const source = readFileSync(path.join(repoRoot, "src", "zotero", "main.js"), "utf8");
   const css = source.slice(source.indexOf("const TOGGLE_CSS"), source.indexOf("`;", source.indexOf("const TOGGLE_CSS")));

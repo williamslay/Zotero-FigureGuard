@@ -413,3 +413,106 @@ describe("placements: diagnostics", () => {
     assert.equal(placements.length, 0);
   });
 });
+
+describe("placements: Zotero-aligned operator coverage", () => {
+  it("drops pure 1D horizontal/vertical lines and 0x0 moves as degenerate-rect", () => {
+    const { placements, skipped } = collect(
+      [OPS.constructPath, OPS.constructPath, OPS.constructPath, OPS.constructPath],
+      [
+        [OPS.stroke, null, [50, 100, 250, 100]],
+        [OPS.stroke, null, [50, 100, 50, 220]],
+        [OPS.stroke, null, [80, 80, 80, 80]],
+        [OPS.stroke, null, [50, 100, 250, 101]],
+      ],
+    );
+    assert.equal(placements.length, 1);
+    assert.deepEqual(placements[0].rect, [50, 100, 250, 101]);
+    assert.equal(skipped.filter((s) => s.reason === "degenerate-rect").length, 3);
+  });
+
+  it("extracts inline images, image masks, solid color masks, and clipped shading fills", () => {
+    const { placements } = collect(
+      [
+        OPS.save,
+        OPS.transform,
+        OPS.paintInlineImageXObject,
+        OPS.restore,
+        OPS.save,
+        OPS.transform,
+        OPS.paintImageMaskXObject,
+        OPS.restore,
+        OPS.save,
+        OPS.transform,
+        OPS.paintSolidColorImageMask,
+        OPS.restore,
+        OPS.save,
+        OPS.clip,
+        OPS.constructPath,
+        OPS.shadingFill,
+        OPS.restore,
+      ],
+      [
+        null,
+        [100, 0, 0, 80, 50, 400],
+        [{}],
+        null,
+        null,
+        [60, 0, 0, 60, 200, 400],
+        [{}],
+        null,
+        null,
+        [40, 0, 0, 40, 300, 400],
+        null,
+        null,
+        null,
+        null,
+        [OPS.endPath, null, [100, 100, 220, 220]],
+        [0],
+        null,
+      ],
+    );
+    assert.deepEqual(
+      placements.map((p) => [p.kind, p.rect]),
+      [
+        ["image", [50, 400, 150, 480]],
+        ["image", [200, 400, 260, 460]],
+        ["image", [300, 400, 340, 440]],
+        ["path", [100, 100, 220, 220]],
+      ],
+    );
+  });
+
+  it("clips subsequent artwork to active W/W* clip paths while keeping pre-clip bounds", () => {
+    const { placements } = collect(
+      [
+        OPS.save,
+        OPS.eoClip,
+        OPS.constructPath,
+        OPS.save,
+        OPS.transform,
+        OPS.paintImageXObject,
+        OPS.restore,
+        OPS.constructPath,
+        OPS.restore,
+      ],
+      [
+        null,
+        null,
+        [OPS.endPath, null, [100, 100, 300, 300]],
+        null,
+        [400, 0, 0, 400, 0, 0],
+        ["img"],
+        null,
+        [OPS.fill, null, [50, 120, 350, 250]],
+        null,
+      ],
+    );
+    assert.deepEqual(
+      placements.map((p) => [p.kind, p.rect, p.rawRect ?? null]),
+      [
+        ["image", [100, 100, 300, 300], null],
+        ["path", [100, 120, 300, 250], [50, 120, 350, 250]],
+      ],
+    );
+  });
+});

@@ -58,9 +58,17 @@ export function resolveOperatorCodes(OPS) {
     "save",
     "restore",
     "transform",
+    "clip",
+    "eoClip",
+    "shadingFill",
     "paintImageXObject",
     "paintImageXObjectRepeat",
     "paintJpegXObject",
+    "paintInlineImageXObject",
+    "paintInlineImageXObjectGroup",
+    "paintImageMaskXObject",
+    "paintImageMaskXObjectGroup",
+    "paintSolidColorImageMask",
     "paintFormXObjectBegin",
     "paintFormXObjectEnd",
     "constructPath",
@@ -79,6 +87,7 @@ export function resolveOperatorCodes(OPS) {
       typeof value === "number" &&
       /^paint(Image|Jpeg)XObject/.test(key) &&
       !key.endsWith("Repeat") &&
+      !key.includes("Mask") &&
       !codes.paintImageXObject.includes(value)
     ) {
       codes.paintImageXObject.push(value);
@@ -136,12 +145,42 @@ export function collectPlacements({ ops, args = [], codes }) {
   // zero-area rect, which is "clips everything", not "no clip". `/Group`
   // (OPS.beginGroup) clipping is deliberately out of scope here: it measured
   // neutral on both fixtures and would need a new operator-code mapping.
-  let clip = null;
+  let formClip = null;
+  let pathClip = null;
+  let pendingClip = false;
   let restoreCount = 0;
   let pathCount = 0;
   let clippedCount = 0;
 
+  const activeClip = () =>
+    formClip && pathClip
+      ? intersectRects(formClip, pathClip) ?? formClip
+      : formClip ?? pathClip;
+
   const push = (placement) => placements.push(placement);
+  const pushUnitImage = (matrix, opIndex) => {
+    const rect = rectFromMatrix(matrix, [0, 0, 1, 1]);
+    if (!isUsableRect(rect)) {
+      skipped.push({ kind: "image", opIndex, reason: "degenerate-rect" });
+      return;
+    }
+    const clipped = clipRect(rect, activeClip());
+    if (!clipped) {
+      clippedCount += 1;
+      skipped.push({ kind: "image", opIndex, reason: "outside-clip" });
+      return;
+    }
+    if (!sameRect(clipped, rect)) clippedCount += 1;
+    push({
+      kind: "image",
+      rect: clipped,
+      localBox: [0, 0, 1, 1],
+      matrix: IDENTITY,
+      ctm: matrix,
+      depth: formDepth,
+      opIndex,
+    });
+  };
 
   for (let i = 0; i < ops.length; i++) {
     const name = codeIndex.get(ops[i]);
@@ -150,7 +189,7 @@ export function collectPlacements({ ops, args = [], codes }) {
 
     switch (name) {
       case "save":
-        stack.push({ ctm, formDepth, clip });
+        stack.push({ ctm, formDepth, formClip, pathClip, pendingClip });
         break;
 
       case "restore": {
@@ -158,7 +197,9 @@ export function collectPlacements({ ops, args = [], codes }) {
         if (state) {
           ctm = state.ctm;
           formDepth = state.formDepth;
-          clip = state.clip;
+          formClip = state.formClip;
+          pathClip = state.pathClip;
+          pendingClip = state.pendingClip;
         }
         restoreCount += 1;
         break;
@@ -170,34 +211,54 @@ export function collectPlacements({ ops, args = [], codes }) {
         break;
       }
 
+      case "clip":
+      case "eoClip":
+        pendingClip = true;
+        break;
+
       case "paintImageXObject":
-      case "paintJpegXObject": {
-        // An Image XObject paints the unit square; the CTM gives its page box.
-        const rect = rectFromMatrix(ctm, [0, 0, 1, 1]);
-        if (!isUsableRect(rect)) {
-          skipped.push({ kind: "image", opIndex: i, reason: "degenerate-rect" });
-          break;
+      case "paintJpegXObject":
+      case "paintInlineImageXObject":
+      case "paintImageMaskXObject":
+      case "paintSolidColorImageMask": {
+        // Image and image-mask operators paint the unit square [0,0,1,1] under CTM.
+        pushUnitImage(ctm, i);
+        break;
+      }
+
+      case "paintInlineImageXObjectGroup": {
+        const map = Array.isArray(opArgs?.[1]) ? opArgs[1] : [];
+        for (const entry of map) {
+          const entryMatrix = toMatrix(entry?.transform);
+          pushUnitImage(entryMatrix ? multiplyMatrices(ctm, entryMatrix) : ctm, i);
         }
-        // Images inside a form are clipped by its /BBox too: on the Flash
-        // fixture page 1 a 930x616 sub-image reaches visual y 239.28 while the
-        // form containing it ends at 252, and the unclipped row pulled the
-        // Figure 1 region 13 pt above the rendered ink.
-        const clipped = clipRect(rect, clip);
-        if (!clipped) {
-          clippedCount += 1;
-          skipped.push({ kind: "image", opIndex: i, reason: "outside-clip" });
-          break;
+        break;
+      }
+
+      case "paintImageMaskXObjectGroup": {
+        const images = Array.isArray(opArgs?.[0]) ? opArgs[0] : [];
+        for (const entry of images) {
+          const entryMatrix = toMatrix(entry?.transform);
+          pushUnitImage(entryMatrix ? multiplyMatrices(ctm, entryMatrix) : ctm, i);
         }
-        if (!sameRect(clipped, rect)) clippedCount += 1;
-        push({
-          kind: "image",
-          rect: clipped,
-          localBox: [0, 0, 1, 1],
-          matrix: IDENTITY,
-          ctm,
-          depth: formDepth,
-          opIndex: i,
-        });
+        break;
+      }
+
+      case "shadingFill": {
+        // `sh` fills the active clipping path; ignore unclipped full-page fills.
+        const currentClip = activeClip();
+        if (currentClip && isUsableRect(currentClip)) {
+          pathCount += 1;
+          push({
+            kind: "path",
+            rect: [...currentClip],
+            localBox: null,
+            matrix: IDENTITY,
+            ctm,
+            depth: formDepth,
+            opIndex: i,
+          });
+        }
         break;
       }
 
@@ -213,9 +274,19 @@ export function collectPlacements({ ops, args = [], codes }) {
         // pdf.js records `constructPath(mode, points, minMax)`; `minMax` is the
         // path bounds in the user space of the CTM in effect here. `rawFillPath`
         // is always a fill, so its bounds sit one argument earlier.
+        const wasClip = pendingClip;
+        pendingClip = false;
         const mode = name === "constructPath" ? opArgs?.[0] : null;
         const bounds = toBounds(name === "constructPath" ? opArgs?.[2] : opArgs?.[1]);
-        if (name === "constructPath" && !paintCodes.has(mode)) {
+        const isPainted = name !== "constructPath" || paintCodes.has(mode);
+
+        if (wasClip && bounds) {
+          const clipCandidate = rectFromMatrix(ctm, bounds);
+          if (isUsableRect(clipCandidate)) {
+            pathClip = pathClip ? intersectRects(pathClip, clipCandidate) ?? clipCandidate : clipCandidate;
+          }
+        }
+        if (!isPainted) {
           skipped.push({ kind: "path", opIndex: i, reason: "path-not-painted" });
           break;
         }
@@ -223,14 +294,24 @@ export function collectPlacements({ ops, args = [], codes }) {
           skipped.push({ kind: "path", opIndex: i, reason: "path-no-bounds" });
           break;
         }
+        // Pure 1D horizontal/vertical lines (`dx === 0 || dy === 0`) are dropped as
+        // degenerate-rect: real vector figures contain 2D primitives, whereas
+        // 1D lines are overwhelmingly table rules and page dividers.
         const rect = rectFromMatrix(ctm, bounds);
         if (!isUsableRect(rect)) {
           skipped.push({ kind: "path", opIndex: i, reason: "degenerate-rect" });
           break;
         }
-        // The renderer clips painted paths at the enclosing form's /BBox; see
-        // the Flash page 8 legend bars cited at the `clip` declaration.
-        const clipped = clipRect(rect, clip);
+        // Apply Form /BBox clip and active path clip, keeping the pre-path-clip
+        // extent when clipped solely by a `W` clip so off-page path filters still
+        // see degenerate external extents.
+        const formClamped = clipRect(rect, formClip);
+        if (!formClamped) {
+          clippedCount += 1;
+          skipped.push({ kind: "path", opIndex: i, reason: "outside-clip" });
+          break;
+        }
+        const clipped = clipRect(formClamped, pathClip);
         if (!clipped) {
           clippedCount += 1;
           skipped.push({ kind: "path", opIndex: i, reason: "outside-clip" });
@@ -241,6 +322,7 @@ export function collectPlacements({ ops, args = [], codes }) {
         push({
           kind: "path",
           rect: clipped,
+          rawRect: !sameRect(clipped, formClamped) ? formClamped : null,
           localBox: null,
           matrix: IDENTITY,
           ctm,
@@ -254,8 +336,9 @@ export function collectPlacements({ ops, args = [], codes }) {
         const formMatrix = toMatrix(opArgs?.[0]) ?? IDENTITY;
         const localBox = toRect(opArgs?.[1]);
         // The clip to restore at this form's end, captured before any branch
-        // below reassigns `clip`.
-        const entryClip = clip;
+        // below reassigns `formClip` / `pathClip`.
+        const entryFormClip = formClip;
+        const entryPathClip = pathClip;
         if (!localBox || localBox[2] <= localBox[0] || localBox[3] <= localBox[1]) {
           // No /BBox means no clip, exactly as in pdf.js: the active clip is
           // inherited unchanged for everything inside. Load-bearing on the
@@ -269,14 +352,14 @@ export function collectPlacements({ ops, args = [], codes }) {
           if (!isUsableRect(rect)) {
             skipped.push({ kind: "form", opIndex: i, reason: "degenerate-rect" });
           } else {
-            const clipped = clipRect(rect, clip);
+            const clipped = clipRect(rect, activeClip());
             if (!clipped) {
               // Fully outside the parent clip: the form paints nothing. Its
               // children keep the form's own box as clip, so nested evidence
               // is still bounded, just no longer by the grandparent too.
               clippedCount += 1;
               skipped.push({ kind: "form", opIndex: i, reason: "outside-clip" });
-              clip = rect;
+              formClip = rect;
             } else {
               if (!sameRect(clipped, rect)) clippedCount += 1;
               push({
@@ -288,14 +371,22 @@ export function collectPlacements({ ops, args = [], codes }) {
                 depth: formDepth,
                 opIndex: i,
               });
-              clip = clipped;
+              formClip = clipped;
             }
           }
         }
         formDepth += 1;
         // pdf.js applies the form /Matrix to the graphics state for the duration
         // of the form, so path coordinates inside it must see it too.
-        stack.push({ ctm, formDepth: formDepth - 1, form: true, clip: entryClip });
+        stack.push({
+          ctm,
+          formDepth: formDepth - 1,
+          form: true,
+          formClip: entryFormClip,
+          pathClip: entryPathClip,
+          pendingClip,
+        });
+        pendingClip = false;
         ctm = multiplyMatrices(ctm, formMatrix);
         break;
       }
@@ -313,9 +404,12 @@ export function collectPlacements({ ops, args = [], codes }) {
         if (state) {
           ctm = state.ctm;
           formDepth = state.formDepth;
-          clip = state.clip;
+          formClip = state.formClip;
+          pathClip = state.pathClip;
+          pendingClip = Boolean(state.pendingClip);
         } else {
           formDepth = Math.max(0, formDepth - 1);
+          pendingClip = false;
         }
         break;
       }

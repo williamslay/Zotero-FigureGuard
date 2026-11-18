@@ -60,19 +60,19 @@ describe("hikv fixture: panel-grid figures", () => {
     await close();
   });
 
-  it("paints figure 7 as one grid of six panels", () => {
+  it("paints figure 7 as one grid of six panels with axis and subfigure labels", () => {
     const { accepted, smallPathRejects } = pages.get(9);
     assert.deepEqual(accepted, [
-      { rect: [109.86, 79.36, 514.46, 250.0], caption: null, confidence: 0.65 },
+      { rect: [88.37, 76.72, 523.14, 280.76], caption: null, confidence: 0.65 },
     ]);
     assert.deepEqual(smallPathRejects, []);
   });
 
-  it("paints figures 8 and 9 as their two panel rows, unbridged", () => {
+  it("paints figures 8 and 9 as their two panel rows, unbridged and rightly captioned", () => {
     const { accepted, smallPathRejects } = pages.get(10);
     assert.deepEqual(accepted, [
-      { rect: [110.68, 81.74, 513.05, 138.3], caption: null, confidence: 0.65 },
-      { rect: [110.68, 218.85, 513.05, 275.41], caption: "8", confidence: 0.8 },
+      { rect: [89.01, 81.74, 517.61, 172.53], caption: "8", confidence: 0.85 },
+      { rect: [89.01, 218.85, 516.03, 309.64], caption: "9", confidence: 0.85 },
     ]);
     assert.deepEqual(smallPathRejects, []);
   });
@@ -92,13 +92,13 @@ describe("hikv fixture: panel-grid figures", () => {
     for (const [pageNumber, count] of figureCounts) {
       assert.equal(pages.get(pageNumber).accepted.length, count, `page ${pageNumber}`);
     }
-    // The figures that were already painted keep their borders and captions.
-    assert.deepEqual(pages.get(8).accepted[0].rect, [108.36, 75.65, 292.07, 163.24]);
-    assert.deepEqual(pages.get(11).accepted[1].rect, [325.97, 194.64, 516.1, 277.78]);
+    // 4-way label expansion pulls Y-axis ticks, X-axis ticks, and top legend labels in.
+    assert.deepEqual(pages.get(8).accepted[0].rect, [108.36, 71.74, 292.07, 171.88]);
+    assert.deepEqual(pages.get(11).accepted[1].rect, [325.97, 191.02, 516.1, 286.64]);
     assert.equal(pages.get(11).accepted[1].caption, "12");
   });
 
   it("still rejects the title-page logo panel, which has no peers", () => {
-    assert.deepEqual(pages.get(1).smallPathRejects, [[173.21, 147.73, 270, 184.39]]);
+    assert.deepEqual(pages.get(1).smallPathRejects, [[143.41, 147.17, 270, 186.97]]);
   });
 });

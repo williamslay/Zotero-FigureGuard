@@ -138,6 +138,20 @@ export const DEFAULT_DETECTOR_OPTIONS = Object.freeze({
    * placed should not chain.
    */
   panelAlignOverlapRatio: 0.6,
+  /** Blocker inflation (pt) around prose/caption lines for sight tests. */
+  blockerInflatePt: 1.5,
+  /** Vertical expansion budget (pt) above artwork for titles/legends. */
+  textAboveExpansionPt: 20,
+  /** Vertical expansion budget (pt) below artwork before caption linking. */
+  textBelowPreCaptionPt: 26,
+  /** Vertical expansion budget (pt) below artwork for axis/subfigure labels. */
+  textBelowExpansionPt: 36,
+  /** Edge-to-edge gap (pt) within which mixed graphic types merge in clear sight. */
+  mixedGraphicGapPt: 12,
+  /** Multi-criteria standalone image thresholds (Zotero Reading Mode 2-of-3 rule). */
+  standaloneImageMinWidthRatio: 0.15,
+  standaloneImageMinHeightRatio: 0.08,
+  standaloneImageMinAreaRatio: 0.015,
   /** Page inset used for the "inside margins" confidence bonus. */
   marginInsetPt: 12,
   minAspect: 0.15,

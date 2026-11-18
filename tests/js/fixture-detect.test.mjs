@@ -260,12 +260,9 @@ describe("A1 fixture: whole document survey", () => {
     );
   });
 
-  it("drops no path box as off-page, splits no cluster, grows no border", () => {
-    // Round 21 added the off-page filter and the interior-caption split; round
-    // 22 added the text-driven width growth. Every figure here is drawn inside
-    // the page, every caption sits below its own artwork, and every legend is
-    // vector art, so all three rules must be no-ops: the accepted borders
-    // recorded in reports/A1-detection.json are unchanged.
+  it("drops no path box as off-page, splits no cluster, and expands subfigure labels", () => {
+    // 4-way label expansion pulls subfigure captions `(a)`..`(f)` sitting
+    // cleanly above the main Figure caption into the region on pages 7, 9, and 11.
     const offPage = pathCounters.flatMap((c, index) =>
       c.offPage ? [`page ${index + 1} dropped ${c.offPage}`] : [],
     );
@@ -277,7 +274,7 @@ describe("A1 fixture: whole document survey", () => {
     );
     assert.deepEqual(offPage, []);
     assert.deepEqual(splits, []);
-    assert.deepEqual(textGrowth, []);
+    assert.deepEqual(textGrowth, ["page 7 grew 2", "page 9 grew 1", "page 11 grew 5"]);
   });
 
   it("keeps every accepted border pinned against the oracle", () => {
@@ -286,17 +283,17 @@ describe("A1 fixture: whole document survey", () => {
       [5, "2", [54, 72, 294.13, 174.05]],
       [5, "3", [317.88, 72, 558, 214.52]],
       [6, "4", [317.88, 72, 558, 135.12]],
-      [7, "6", [320.37, 72.45, 560.49, 165.43]],
-      [7, "5", [57.46, 75.19, 291.55, 305.04]],
-      [9, "7", [56.55, 81.96, 555.45, 180.45]],
+      [7, "6", [320.37, 72.45, 560.49, 176.04]],
+      [7, "5", [57.46, 75.19, 291.55, 316.25]],
+      [9, "7", [56.55, 81.96, 555.45, 191.06]],
       [9, "8", [317.88, 235.75, 558.01, 331.51]],
       [9, "9", [317.88, 356.42, 558.01, 452.18]],
       [10, "10", [54, 72, 294.13, 167.76]],
-      [11, null, [60.29, 84.35, 209.43, 163.92]],
-      [11, null, [231.68, 84.35, 380.82, 163.92]],
-      [11, null, [403.07, 84.35, 552.21, 163.92]],
-      [11, "11", [56.49, 189.55, 555.51, 272.74]],
-      [11, "12", [56.49, 320.06, 555.51, 403.24]],
+      [11, null, [60.29, 84.35, 209.43, 175.76]],
+      [11, null, [231.68, 84.35, 380.82, 175.76]],
+      [11, null, [403.07, 84.35, 552.21, 175.76]],
+      [11, "11", [56.49, 189.55, 555.51, 283.35]],
+      [11, "12", [56.49, 320.06, 555.51, 413.85]],
       [11, "13", [341.89, 448.57, 534, 554.72]],
       [12, "14", [54, 72, 558.01, 220.24]],
       [13, "15", [54, 72, 555.52, 157.05]],
