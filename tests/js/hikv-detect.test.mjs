@@ -53,6 +53,7 @@ describe("hikv fixture: panel-grid figures", () => {
         smallPathRejects: result.rejected
           .filter((entry) => entry.reason === "path-below-area-threshold")
           .map((entry) => toPageTopLeft(entry.rect)),
+        skippedNoCaption: Boolean(result.diagnostics.skippedNoCaption),
       });
     }
   });
@@ -63,7 +64,7 @@ describe("hikv fixture: panel-grid figures", () => {
   it("paints figure 7 as one grid of six panels with axis and subfigure labels", () => {
     const { accepted, smallPathRejects } = pages.get(9);
     assert.deepEqual(accepted, [
-      { rect: [88.37, 76.72, 523.14, 280.76], caption: null, confidence: 0.65 },
+      { rect: [88.37, 76.72, 523.14, 290.23], caption: "7", confidence: 0.85 },
     ]);
     assert.deepEqual(smallPathRejects, []);
   });
@@ -92,13 +93,14 @@ describe("hikv fixture: panel-grid figures", () => {
     for (const [pageNumber, count] of figureCounts) {
       assert.equal(pages.get(pageNumber).accepted.length, count, `page ${pageNumber}`);
     }
-    // 4-way label expansion pulls Y-axis ticks, X-axis ticks, and top legend labels in.
-    assert.deepEqual(pages.get(8).accepted[0].rect, [108.36, 71.74, 292.07, 171.88]);
+    // 4-way label expansion pulls Y-axis ticks, X-axis ticks, rotated Y-axis title, and top legend labels in.
+    assert.deepEqual(pages.get(8).accepted[0].rect, [95.51, 71.74, 292.07, 171.88]);
     assert.deepEqual(pages.get(11).accepted[1].rect, [325.97, 191.02, 516.1, 286.64]);
     assert.equal(pages.get(11).accepted[1].caption, "12");
   });
 
-  it("still rejects the title-page logo panel, which has no peers", () => {
-    assert.deepEqual(pages.get(1).smallPathRejects, [[143.41, 147.17, 270, 186.97]]);
+  it("skips captionless title-page logo panels without running path clustering", () => {
+    assert.deepEqual(pages.get(1).accepted, []);
+    assert.equal(pages.get(1).skippedNoCaption, true);
   });
 });

@@ -223,11 +223,11 @@ describe("fluidkv fixture: whole document survey", () => {
       [0, 1, 2, 1, 2, 1, 0, 0, 2, 3, 3, 0, 0, 0],
     );
     const grown = [
-      [2, "1", 346.83, 326.63],
+      [2, "1", 328.8, 326.63],
       [3, "2", 60.71, 59.54],
       [3, "4", 324.87, 323.57],
       [4, "5", 56.04, 55.13],
-      [5, "9", 340.76, 328.32],
+      [5, "9", 334.82, 328.32],
       [9, "11", 56.04, 55.22],
       [10, "13", 56.04, 53.58],
       [10, "14", 56.04, 55.03],
@@ -247,6 +247,8 @@ describe("fluidkv fixture: whole document survey", () => {
       assert.equal(round2(unexpanded.rect)[0], ctlLeft, `page ${pageNumber} figure ${captionNumber} control left`);
       assert.equal(round2(region.rect)[0], grownLeft, `page ${pageNumber} figure ${captionNumber} grown left`);
     }
+    const fig18 = regionEvidence[10].regions.find((candidate) => candidate.captionNumber === "18");
+    assert.deepEqual(round2(fig18.rect), [318.21, 404.59, 557.74, 530.89]);
   });
 
   it("switches text growth off without moving the accepted caption set", () => {

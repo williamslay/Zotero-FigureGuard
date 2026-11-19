@@ -116,6 +116,20 @@ describe("captions: horizontal gap segmentation", () => {
     assert.equal(collectTextLines(runs, { columnGapMinFontSizeUnits: 1 }).length, 2);
     assert.equal(collectTextLines(runs, { columnGapMinPt: 200 }).length, 1);
   });
+
+  it("splits two adjacent figure captions across a 1.9x column gutter", () => {
+    const runs = [
+      item("Figure 9: Random-load Performance. This figure", 72, 370, 9.963, 222.3),
+      item("Figure 10: Write Amplification of WiscKey.", 313.7, 370, 9.963, 200),
+    ];
+    const lines = collectTextLines(runs);
+    assert.equal(lines.length, 2);
+    const captions = collectCaptions(lines);
+    assert.deepEqual(
+      captions.map((c) => c.number),
+      ["9", "10"],
+    );
+  });
 });
 
 describe("captions: figure labels", () => {
@@ -144,5 +158,21 @@ describe("captions: figure labels", () => {
     ]);
     assert.deepEqual(caption.rect, [54, 599.615, 300, 609.578]);
     assert.equal(caption.label, "Figure 2:");
+  });
+
+  it("ignores wrapped in-paragraph references starting a line with 'Figure N.'", () => {
+    const lines = [
+      {
+        text: "percentage of the total time, for the reasons explained in",
+        rect: [315.3, 193.1, 540.3, 203.1],
+        fontSize: 10,
+      },
+      {
+        text: "Figure 6. For larger pairs, log writing and the memtable",
+        rect: [315.3, 181.3, 540.5, 191.2],
+        fontSize: 10,
+      },
+    ];
+    assert.equal(collectCaptions(lines).length, 0);
   });
 });

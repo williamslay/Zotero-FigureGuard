@@ -104,7 +104,7 @@ describe("borges fixture: whole document survey", () => {
     // `page-sized`, so page 12 yields nothing at all.
     const page12 = survey[11];
     assert.equal(page12.pathBoxesOffPage, 15, "15 boxes dropped");
-    assert.equal(page12.pathBoxes, 72, "page 12 carries 72 raw vector boxes");
+    assert.equal(page12.pathBoxes, 377, "page 12 carries 377 raw vector boxes including 1D strokes");
     assert.equal(page12.pathClusters, 2, "the two figure bands end up as two clusters");
   });
 

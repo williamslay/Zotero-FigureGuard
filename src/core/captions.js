@@ -162,7 +162,10 @@ function splitByGap(bucket, gapUnits, gapFloor) {
   for (const part of bucket.slice(1)) {
     const size = median(segment.map((run) => run.fontSize)) || part.fontSize;
     const threshold = Math.max(gapUnits * size, gapFloor);
-    if (part.rect[0] - right > threshold) {
+    const gap = part.rect[0] - right;
+    const segmentIsCaption = CAPTION_RE.test(segment.map((run) => run.str).join(" "));
+    const startsSecondCaption = segmentIsCaption && gap > size * 1.8 && CAPTION_RE.test(part.str);
+    if (gap > threshold || startsSecondCaption) {
       segments.push(segment);
       segment = [part];
       right = part.rect[2];
@@ -184,10 +187,14 @@ function splitByGap(bucket, gapUnits, gapFloor) {
  * @returns {Array<{number: string, label: string, text: string, rect: number[], fontSize: number}>}
  */
 export function collectCaptions(lines, options = {}) {
+  void options;
   const captions = [];
-  for (const line of lines ?? []) {
+  const list = lines ?? [];
+  for (let i = 0; i < list.length; i++) {
+    const line = list[i];
     const match = CAPTION_RE.exec(line.text);
     if (!match) continue;
+    if (isWrappedBodyContinuation(line, match[0], list)) continue;
     captions.push({
       number: match[1],
       label: `${match[0].trim()}`,
@@ -197,6 +204,32 @@ export function collectCaptions(lines, options = {}) {
     });
   }
   return captions;
+}
+
+/**
+ * Filter mid-sentence prose line wraps that happen to begin with "Figure 6."
+ * (e.g. "...for the reasons explained in\nFigure 6. For larger pairs...").
+ */
+function isWrappedBodyContinuation(line, matchedPrefix, lines) {
+  if (!matchedPrefix.trim().endsWith(".")) return false;
+  const lr = line?.rect;
+  if (!lr || !(line.fontSize > 0)) return false;
+  const lw = lr[2] - lr[0];
+  for (const prev of lines) {
+    if (prev === line || !prev?.rect) continue;
+    const pr = prev.rect;
+    const gapY = pr[1] - lr[3];
+    if (gapY < -1 || gapY > 0.55 * line.fontSize) continue;
+    if (prev.fontSize > 0 && Math.abs(prev.fontSize - line.fontSize) > 1.0) continue;
+    if (pr[0] > lr[0] + 4 || pr[2] < lr[2] - 12) continue;
+    const prevText = String(prev.text ?? "").trim();
+    if (!prevText || /^\s*\([a-z0-9]{1,3}\)/i.test(prevText)) continue;
+    if (/[.?!:;)\]]$/.test(prevText)) continue;
+    if (!/[a-z,]$/.test(prevText)) continue;
+    const words = prevText.split(/\s+/).filter(Boolean).length;
+    if (words >= 6 && pr[2] - pr[0] >= lw * 0.75) return true;
+  }
+  return false;
 }
 
 function median(values) {

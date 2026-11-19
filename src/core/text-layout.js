@@ -20,7 +20,7 @@ import {
   unionRect,
 } from "./geom.js";
 
-const TABLE_OR_ALGO_CAPTION_RE = /^\s*(?:table|tab\.?|algorithm)\s*[0-9ivx]+\s*[:.)\s]/i;
+const TABLE_OR_ALGO_CAPTION_RE = /^\s*(?:table|tab\.?|algorithm)\s*[0-9ivx]+[a-z]?\s*(?:[:.)]|$)/i;
 const SECTION_HEADING_RE = /^\s*(?:\d+(?:\.\d+)*\.?|[IVX]+\.)\s+[A-Z]/;
 const SUBFIGURE_PREFIX_RE = /^\s*\([a-z0-9]{1,3}\)(?:\s|$)/i;
 const NUMERIC_TICK_ROW_RE = /^[\d.,+\-%eE/\s()]+$/;
@@ -118,14 +118,44 @@ function countWords(text) {
     .filter(Boolean).length;
 }
 
-function isProseOrHeadingLine(line, pageWidth) {
+/**
+ * Estimate dominant body-text typography on the page (PDFFigures 2.0
+ * `RegionClassifier` prior) from wide multi-word lines so chart labels slightly
+ * larger than 7.5 pt yet smaller/narrower than body prose are not mislabeled as
+ * prose blockers.
+ */
+function computePageTypographyProfile(lines, pageWidth) {
+  const sizes = [];
+  const widths = [];
+  for (const line of lines ?? []) {
+    const text = String(line?.text ?? "").trim();
+    if (!text || CAPTION_RE.test(text) || TABLE_OR_ALGO_CAPTION_RE.test(text)) continue;
+    const fs = Number(line?.fontSize) || 0;
+    const w = rectWidth(line.rect);
+    const words = countWords(text);
+    if (fs >= 7.5 && words >= 5 && pageWidth > 0 && w / pageWidth >= 0.25) {
+      sizes.push(fs);
+      widths.push(w);
+    }
+  }
+  if (sizes.length < 3) return { bodyFontSize: null, bodyLineWidth: null };
+  sizes.sort((a, b) => a - b);
+  widths.sort((a, b) => a - b);
+  return {
+    bodyFontSize: sizes[Math.floor(sizes.length / 2)],
+    bodyLineWidth: widths[Math.floor(widths.length / 2)],
+  };
+}
+
+function isProseOrHeadingLine(line, pageWidth, typography = null) {
   const text = String(line?.text ?? "").trim();
   if (!text) return false;
   if (CAPTION_RE.test(text) || TABLE_OR_ALGO_CAPTION_RE.test(text)) return true;
   if (SUBFIGURE_PREFIX_RE.test(text)) return false;
   if (NUMERIC_TICK_ROW_RE.test(text)) return false;
   // Tiny-font labels (< 7.5 pt) inside figures and legends are not body prose.
-  if ((line.fontSize ?? 0) > 0 && line.fontSize < 7.5) return false;
+  const fontSize = Number(line?.fontSize) || 0;
+  if (fontSize > 0 && fontSize < 7.5) return false;
 
   const width = rectWidth(line.rect);
   const words = countWords(text);
@@ -139,6 +169,22 @@ function isProseOrHeadingLine(line, pageWidth) {
   const lowercaseWords = tokens.filter((tok) => /^[a-z]{2,}(?:-[a-z]{2,})*[.,;:?!]?$/.test(tok)).length;
   const hasSentencePunct = /[.?!;:]/.test(text);
   const endsSentence = /[.?!,;:](\s|$)/.test(text);
+
+  // Page-prior guard: significantly sub-body text (<= 85% of bodyFontSize,
+  // e.g. <= 8.4 pt in a 10 pt paper) that is narrower than wide footnotes/body
+  // and lacks sentence endings is diagram/table text rather than body prose.
+  if (
+    typography?.bodyFontSize &&
+    typography.bodyFontSize >= 8.5 &&
+    fontSize > 0 &&
+    fontSize <= typography.bodyFontSize * 0.85 &&
+    ratio < 0.34 &&
+    !endsSentence &&
+    !SECTION_HEADING_RE.test(text)
+  ) {
+    return false;
+  }
+
   if (alphaLongWords < 3 && !endsSentence) return false;
 
   // Multi-series legend rows ("RocksDB MatrixKV ...") have no lowercase prose words or punctuation.
@@ -154,7 +200,7 @@ function isProseOrHeadingLine(line, pageWidth) {
     if (/[①-⑳ⓐ-ⓩⒶ-Ⓩ]/.test(text) && ratio < 0.3) return false;
     if (lowercaseWords >= 3 || hasSentencePunct) return true;
   }
-  if (SECTION_HEADING_RE.test(text) && words >= 2 && (line.fontSize ?? 0) >= 8.5) return true;
+  if (SECTION_HEADING_RE.test(text) && words >= 2 && fontSize >= 8.5) return true;
   return false;
 }
 
@@ -204,6 +250,7 @@ export function analyzePageText(textItems, captions, pageRect, options = {}) {
   }
 
   const hLines = collectTextLines(horizontalItems);
+  const typography = computePageTypographyProfile(hLines, pageWidth);
   const blockers = [];
   const proseBlockers = [];
   const captionBlockers = [];
@@ -227,7 +274,7 @@ export function analyzePageText(textItems, captions, pageRect, options = {}) {
     if (TABLE_OR_ALGO_CAPTION_RE.test(line.text)) {
       tableCaptionRects.push(line.rect);
     }
-    if (isProseOrHeadingLine(line, pageWidth)) {
+    if (isProseOrHeadingLine(line, pageWidth, typography)) {
       const inf = inflateRect(line.rect, inflate);
       blockers.push(inf);
       proseBlockers.push(inf);
@@ -246,7 +293,190 @@ export function analyzePageText(textItems, captions, pageRect, options = {}) {
   }
   labelCandidates.push(...rotatedLabels);
 
-  return { blockers, proseBlockers, captionBlockers, tableCaptionRects, allTextRects, labelCandidates };
+  const tableTerritories = extractTableTerritories(
+    tableCaptionRects,
+    hLines,
+    captions,
+    proseBlockers,
+    pageRect,
+  );
+
+  return {
+    blockers,
+    proseBlockers,
+    captionBlockers,
+    tableCaptionRects,
+    tableTerritories,
+    typography,
+    allTextRects,
+    labelCandidates,
+  };
+}
+
+/**
+ * Derive explicit exclusion rectangles for `Table`/`Algorithm` blocks below
+ * each table caption (PDFFigures 2.0-style territory claiming), stopping at any
+ * prose paragraph, Figure caption, or wider figure-separation gap.
+ *
+ * @param {number[][]} tableCaptionRects
+ * @param {Array<{rect: number[], text: string}>} hLines
+ * @param {Array<{rect: number[]}>} captions
+ * @param {number[][]} proseBlockers
+ * @param {number[]} pageRect
+ * @returns {Array<{rect: number[], captionRect: number[]}>}
+ */
+export function extractTableTerritories(tableCaptionRects, hLines, captions, proseBlockers, pageRect) {
+  if (!tableCaptionRects?.length) return [];
+  const pageWidth = rectWidth(pageRect);
+  const midX = (pageRect[0] + pageRect[2]) / 2;
+  const figCaptions = (captions ?? []).map((c) => c?.rect).filter(Boolean);
+  const territories = [];
+
+  for (const tc of tableCaptionRects) {
+    const isWide =
+      rectWidth(tc) >= pageWidth * 0.48 || (tc[0] < midX - 24 && tc[2] > midX + 24);
+    const colLeft = isWide ? pageRect[0] + 18 : (tc[0] + tc[2]) / 2 < midX ? pageRect[0] + 18 : midX + 2;
+    const colRight = isWide ? pageRect[2] - 18 : (tc[0] + tc[2]) / 2 < midX ? midX - 2 : pageRect[2] - 18;
+    const overlapsCol = (r) => Math.min(r[2], colRight) - Math.max(r[0], colLeft) > 2;
+
+    let minY = pageRect[1] + 18;
+    for (const fc of figCaptions) {
+      if (overlapsCol(fc) && fc[3] < tc[1]) minY = Math.max(minY, fc[3] + 2);
+    }
+    for (const otherTc of tableCaptionRects) {
+      if (otherTc !== tc && overlapsCol(otherTc) && otherTc[3] < tc[1]) {
+        minY = Math.max(minY, otherTc[3] + 2);
+      }
+    }
+    for (const pb of proseBlockers ?? []) {
+      if (pb[3] < tc[1] - 4 && pb[1] >= minY && overlapsCol(pb)) {
+        // Ignore the table caption's own blocker box, stop above body paragraphs.
+        const isTcOwn = pb[2] >= tc[0] - 4 && pb[0] <= tc[2] + 4 && pb[3] >= tc[1] - 4;
+        if (!isTcOwn) minY = Math.max(minY, pb[3] + 2);
+      }
+    }
+
+    const candidates = (hLines ?? [])
+      .filter(
+        (l) =>
+          l?.rect &&
+          overlapsCol(l.rect) &&
+          l.rect[3] < tc[1] - 2 &&
+          l.rect[1] >= minY &&
+          !CAPTION_RE.test(l.text) &&
+          !TABLE_OR_ALGO_CAPTION_RE.test(l.text),
+      )
+      .sort((a, b) => b.rect[3] - a.rect[3]);
+
+    const rows = [];
+    let frontierY = tc[1];
+    let stepSum = 0;
+    for (const line of candidates) {
+      const gap = frontierY - line.rect[3];
+      if (gap < -2) continue;
+      if (!rows.length) {
+        if (gap > 32) break;
+      } else if (rows.length === 1) {
+        if (gap > 16) break;
+        stepSum += Math.max(2, frontierY - line.rect[1]);
+      } else {
+        const avgStep = stepSum / (rows.length - 1);
+        const maxGap = Math.max(12, Math.min(16, avgStep * 1.8));
+        if (gap > maxGap) break;
+        stepSum += Math.max(2, frontierY - line.rect[1]);
+      }
+      rows.push(line.rect);
+      frontierY = Math.min(frontierY, line.rect[1]);
+    }
+
+    if (rows.length >= 2) {
+      let bodyRect = [...rows[0]];
+      for (const r of rows.slice(1)) bodyRect = unionRect(bodyRect, r);
+      const territory = [
+        Math.min(bodyRect[0], tc[0]) - 6,
+        bodyRect[1] - 4,
+        Math.max(bodyRect[2], tc[2]) + 6,
+        tc[1],
+      ];
+      territories.push({ rect: territory, captionRect: tc, direction: "below" });
+      continue;
+    }
+
+    // Bottom-captioned table layouts (e.g. OSDI/SOSP `Table N:` below the table,
+    // including 2-line wrapped captions like `Bigtable p10` where line 2 wraps):
+    // scan upward above `tc[3]` before accepting a 1-line downward hit.
+    let maxY = pageRect[3] - 12;
+    for (const fc of figCaptions) {
+      if (overlapsCol(fc) && fc[1] > tc[3]) maxY = Math.min(maxY, fc[1] - 2);
+    }
+    for (const otherTc of tableCaptionRects) {
+      if (otherTc !== tc && overlapsCol(otherTc) && otherTc[1] > tc[3]) {
+        maxY = Math.min(maxY, otherTc[1] - 2);
+      }
+    }
+    for (const pb of proseBlockers ?? []) {
+      if (pb[1] > tc[3] + 4 && pb[3] <= maxY && overlapsCol(pb)) {
+        const isTcOwn = pb[2] >= tc[0] - 4 && pb[0] <= tc[2] + 4 && pb[1] <= tc[3] + 4;
+        if (!isTcOwn) maxY = Math.min(maxY, pb[1] - 2);
+      }
+    }
+
+    const upCandidates = (hLines ?? [])
+      .filter(
+        (l) =>
+          l?.rect &&
+          overlapsCol(l.rect) &&
+          l.rect[1] > tc[3] + 2 &&
+          l.rect[3] <= maxY &&
+          !CAPTION_RE.test(l.text) &&
+          !TABLE_OR_ALGO_CAPTION_RE.test(l.text),
+      )
+      .sort((a, b) => a.rect[1] - b.rect[1]);
+
+    const upRows = [];
+    let upFrontierY = tc[3];
+    let upStepSum = 0;
+    for (const line of upCandidates) {
+      const gap = line.rect[1] - upFrontierY;
+      if (gap < -2) continue;
+      if (!upRows.length) {
+        if (gap > 36) break;
+      } else if (upRows.length === 1) {
+        if (gap > 18) break;
+        upStepSum += Math.max(2, line.rect[3] - upFrontierY);
+      } else {
+        const avgStep = upStepSum / (upRows.length - 1);
+        const maxGap = Math.max(12, Math.min(18, avgStep * 1.8));
+        if (gap > maxGap) break;
+        upStepSum += Math.max(2, line.rect[3] - upFrontierY);
+      }
+      upRows.push(line.rect);
+      upFrontierY = Math.max(upFrontierY, line.rect[3]);
+    }
+
+    if (upRows.length >= 2) {
+      let bodyRect = [...upRows[0]];
+      for (const r of upRows.slice(1)) bodyRect = unionRect(bodyRect, r);
+      const territory = [
+        Math.min(bodyRect[0], tc[0]) - 6,
+        tc[3],
+        Math.max(bodyRect[2], tc[2]) + 6,
+        bodyRect[3] + 4,
+      ];
+      territories.push({ rect: territory, captionRect: tc, direction: "above" });
+    } else if (rows.length) {
+      let bodyRect = [...rows[0]];
+      for (const r of rows.slice(1)) bodyRect = unionRect(bodyRect, r);
+      const territory = [
+        Math.min(bodyRect[0], tc[0]) - 6,
+        bodyRect[1] - 4,
+        Math.max(bodyRect[2], tc[2]) + 6,
+        tc[1],
+      ];
+      territories.push({ rect: territory, captionRect: tc, direction: "below" });
+    }
+  }
+  return territories;
 }
 
 /**
@@ -448,12 +678,25 @@ export function expandRegionsWithLabels4Way(targets, textLayout, pageRect, optio
           continue;
         }
 
-        // Respect max expansion budgets measured from the original artwork border.
+        // Respect max expansion budgets per direction measured from the original
+        // artwork border. Rotated Y-axis titles centered past plot ticks often
+        // sit 25-30 pt outside the spine (inside page margins); allow up to
+        // 32 pt for rotated axis labels without freezing vertical labels later.
+        const rotatedMarginOk =
+          cand.isRotated && lRect[0] >= pageRect[0] + 45 && lRect[2] <= pageRect[2] - 45;
+        const effectiveSideLimit = rotatedMarginOk ? Math.max(sideLimit, 32) : sideLimit;
         if (
-          border[0] - nextRect[0] > sideLimit ||
-          nextRect[2] - border[2] > sideLimit ||
-          nextRect[3] - border[3] > aboveLimit ||
-          border[1] - nextRect[1] > belowLimit
+          (lRect[0] < region.rect[0] - 0.1 && border[0] - nextRect[0] > effectiveSideLimit) ||
+          (lRect[2] > region.rect[2] + 0.1 && nextRect[2] - border[2] > effectiveSideLimit) ||
+          (lRect[3] > region.rect[3] + 0.1 && nextRect[3] - border[3] > aboveLimit) ||
+          (lRect[1] < region.rect[1] - 0.1 && border[1] - nextRect[1] > belowLimit)
+        ) {
+          continue;
+        }
+        const territories = textLayout.tableTerritories ?? [];
+        if (
+          territories.length &&
+          territories.some((t) => !rectsOverlap(t.rect, border) && rectsOverlap(t.rect, lRect))
         ) {
           continue;
         }

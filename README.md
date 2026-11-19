@@ -51,7 +51,7 @@ Zotero's built-in dark theme makes reading body text comfortable by inverting th
 
 ## At a Glance
 
-- **Automatic figure detection**: Detects vector paths and embedded graphics (Form / Image XObjects) in academic PDFs, merging grid or row-aligned subfigure panels into a unified region.
+- **Caption-anchored paper detection**: Built specifically for **academic research papers** with explicit figure captions (`Figure` / `Fig.` or PDF `/Figure` tags), detecting vector paths and embedded graphics (Form / Image XObjects) and merging grid or row-aligned subfigure panels into a unified region.
 - **Selective color restoration**: Overlays original-color canvases on detected figure boxes while preserving Zotero's dark background for body text.
 - **Responsive to reading flow**: Automatically re-renders across scrolling, zooming, page turns, window resizing, and tab switches, prioritizing the active foreground tab and visible pages.
 - **Document-scoped caching**: Caches detected regions by item and document fingerprint so reopening a paper skips re-detection.
@@ -81,13 +81,14 @@ Once installed, future updates can be fetched directly inside Zotero via **Tools
 ## Compatibility & Scope
 
 - **Zotero compatibility**: Built for **Zotero 7–10** (`figure-guard@zotero.org`); primary real-device testing is performed on **Zotero 10.0.8 / Windows**.
-- **Document types**: Tuned for standard academic PDFs (vector charts, embedded figures, single-column and two-column layouts).
+- **Primary target (academic papers, caption-driven)**: The detection algorithm is designed specifically for **scholarly research papers with explicit figure captions** (`Figure N` / `Fig. N` or PDF `/Figure` structure tags) in single-column and two-column layouts.
+- **Intentional exclusions**: Pages without figure captions, uncaptioned standalone graphics (such as slides, posters, decorative illustrations, or uncaptioned screenshots), and **tables or algorithms** (`Table` / `Algorithm`) are intentionally skipped or rejected to prevent false positives on body prose and table layouts.
 
 <details>
 <summary>Known boundaries (click to expand)</summary>
 
-- Purely scanned bitmap PDFs or unusual shading/masking pipelines are not yet fully covered.
-- Edge-case layouts (such as captions far away from figures or independent side-by-side strip panels) may occasionally be missed or merged imperfectly.
+- Uncaptioned figures, purely scanned bitmap PDFs, or unusual shading/masking pipelines are not covered (to maintain zero prose/table false positives in scholarly papers, uncaptioned graphics are intentionally skipped by the caption gate).
+- Extreme edge-case layouts (such as pure-code figures or tightly mixed table/figure regions without clear caption separation) may occasionally be skipped or cropped imperfectly.
 - The extension is in `0.x` active iteration; see [docs/KNOWN_ISSUES.md](./docs/KNOWN_ISSUES.md) for tracked items and verification status.
 
 </details>

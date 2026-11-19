@@ -415,7 +415,7 @@ describe("placements: diagnostics", () => {
 });
 
 describe("placements: Zotero-aligned operator coverage", () => {
-  it("drops pure 1D horizontal/vertical lines and 0x0 moves as degenerate-rect", () => {
+  it("preserves pure 1D strokes as 1 pt bands while dropping 0x0 moves as degenerate-rect", () => {
     const { placements, skipped } = collect(
       [OPS.constructPath, OPS.constructPath, OPS.constructPath, OPS.constructPath],
       [
@@ -425,9 +425,16 @@ describe("placements: Zotero-aligned operator coverage", () => {
         [OPS.stroke, null, [50, 100, 250, 101]],
       ],
     );
-    assert.equal(placements.length, 1);
-    assert.deepEqual(placements[0].rect, [50, 100, 250, 101]);
-    assert.equal(skipped.filter((s) => s.reason === "degenerate-rect").length, 3);
+    assert.equal(placements.length, 3);
+    assert.deepEqual(
+      placements.map((p) => p.rect),
+      [
+        [50, 100, 250, 101],
+        [50, 100, 51, 220],
+        [50, 100, 250, 101],
+      ],
+    );
+    assert.equal(skipped.filter((s) => s.reason === "degenerate-rect").length, 1);
   });
 
   it("extracts inline images, image masks, solid color masks, and clipped shading fills", () => {

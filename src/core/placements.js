@@ -294,11 +294,13 @@ export function collectPlacements({ ops, args = [], codes }) {
           skipped.push({ kind: "path", opIndex: i, reason: "path-no-bounds" });
           break;
         }
-        // Pure 1D horizontal/vertical lines (`dx === 0 || dy === 0`) are dropped as
-        // degenerate-rect: real vector figures contain 2D primitives, whereas
-        // 1D lines are overwhelmingly table rules and page dividers.
-        const rect = rectFromMatrix(ctm, bounds);
-        if (!isUsableRect(rect)) {
+        // Preserve 1D horizontal/vertical line strokes (gnuplot/matplotlib axes,
+        // borders, and ticks) by expanding a zero-thickness dimension to 1 pt,
+        // while rejecting 0x0 degenerate moves. Table separation is enforced in
+        // `detector.js` via `thinRuleCanJoinCluster` and `onlyThinRules` text guards.
+        const adjustedBounds = expandStrokeBounds(bounds);
+        const rect = adjustedBounds ? rectFromMatrix(ctm, adjustedBounds) : null;
+        if (!rect || !isUsableRect(rect)) {
           skipped.push({ kind: "path", opIndex: i, reason: "degenerate-rect" });
           break;
         }
@@ -434,6 +436,19 @@ export function collectPlacements({ ops, args = [], codes }) {
       clippedCount,
     },
   };
+}
+
+function expandStrokeBounds(bounds) {
+  const r = normalizeRect(bounds);
+  const dx = r[2] - r[0];
+  const dy = r[3] - r[1];
+  if (dx <= 0 && dy <= 0) return null;
+  return [
+    r[0],
+    r[1],
+    dx < 1 ? r[0] + 1 : r[2],
+    dy < 1 ? r[1] + 1 : r[3],
+  ];
 }
 
 function isUsableRect(rect) {

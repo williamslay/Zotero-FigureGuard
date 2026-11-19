@@ -156,6 +156,14 @@ export const DEFAULT_DETECTOR_OPTIONS = Object.freeze({
   marginInsetPt: 12,
   minAspect: 0.15,
   maxAspect: 8,
+  /**
+   * Bounds for recovering `extreme-aspect` candidates attached directly to an
+   * otherwise uncovered Figure caption (e.g., full-width compact bar charts
+   * ~504 x 54 pt whose aspect > 8 despite being genuine figures).
+   */
+  anchoredExtremeAspectMinSidePt: 32,
+  anchoredMinAspect: 0.0625,
+  anchoredMaxAspect: 16,
 });
 
 /** Area of `rect` as a fraction of `pageRect`. */

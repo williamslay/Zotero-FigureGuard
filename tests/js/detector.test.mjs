@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DEFAULT_DETECTOR_OPTIONS, detectFigureRegions, findInteriorCaptionRows } from "../../src/core/detector.js";
+import { analyzePageText } from "../../src/core/text-layout.js";
 
 const PAGE = [0, 0, 612, 792];
 
@@ -56,15 +57,24 @@ describe("detector: acceptance", () => {
     assert.deepEqual(result.regions[0].rect, figure);
   });
 
-  it("accepts a standalone image that needs no caption", () => {
-    const result = detectFigureRegions({
+  it("rejects uncaptioned standalone images on both captionless and captioned pages", () => {
+    const captionless = detectFigureRegions({
       placements: [image([100, 400, 300, 600])],
       captions: [],
       pageRect: PAGE,
     });
-    assert.equal(result.regions.length, 1);
-    assert.equal(result.regions[0].kind, "image");
-    assert.ok(result.regions[0].evidence.includes("standalone-image"));
+    assert.equal(captionless.regions.length, 0);
+    assert.equal(captionless.diagnostics.skippedNoCaption, true);
+    assert.equal(captionless.rejected[0].reason, "no-figure-caption-on-page");
+
+    const otherCaption = captionBelow("9", [400, 120, 520, 200], 8);
+    const onFigurePage = detectFigureRegions({
+      placements: [image([100, 400, 300, 600])],
+      captions: [otherCaption],
+      pageRect: PAGE,
+    });
+    assert.equal(onFigurePage.regions.length, 0);
+    assert.equal(onFigurePage.rejected[0].reason, "no-figure-evidence");
   });
 
   it("accepts a tagged /Figure region when no XObject matches", () => {
@@ -101,8 +111,14 @@ describe("detector: acceptance", () => {
 });
 
 describe("detector: rejection", () => {
+  const otherCaption = captionBelow("9", [400, 120, 520, 200], 8);
+
   it("leaves an unexplained form uncovered rather than guessing", () => {
-    const result = detectFigureRegions({ placements: [form([54, 600, 294, 720])], pageRect: PAGE });
+    const result = detectFigureRegions({
+      placements: [form([54, 600, 294, 720])],
+      captions: [otherCaption],
+      pageRect: PAGE,
+    });
     assert.equal(result.regions.length, 0);
     assert.equal(result.rejected[0].reason, "no-figure-evidence");
   });
@@ -119,22 +135,38 @@ describe("detector: rejection", () => {
   });
 
   it("rejects a thin rule or underline", () => {
-    const result = detectFigureRegions({ placements: [form([54, 400, 558, 404])], pageRect: PAGE });
+    const result = detectFigureRegions({
+      placements: [form([54, 400, 558, 404])],
+      captions: [otherCaption],
+      pageRect: PAGE,
+    });
     assert.equal(result.rejected[0].reason, "thin-decoration");
   });
 
   it("rejects a placement below the minimum area", () => {
-    const result = detectFigureRegions({ placements: [form([54, 400, 84, 420])], pageRect: PAGE });
+    const result = detectFigureRegions({
+      placements: [form([54, 400, 84, 420])],
+      captions: [otherCaption],
+      pageRect: PAGE,
+    });
     assert.equal(result.rejected[0].reason, "below-min-area");
   });
 
   it("rejects an extreme aspect ratio", () => {
-    const result = detectFigureRegions({ placements: [form([0, 400, 612, 460])], pageRect: PAGE });
+    const result = detectFigureRegions({
+      placements: [form([0, 400, 612, 460])],
+      captions: [otherCaption],
+      pageRect: PAGE,
+    });
     assert.equal(result.rejected[0].reason, "extreme-aspect");
   });
 
   it("rejects a small image with no caption", () => {
-    const result = detectFigureRegions({ placements: [image([100, 400, 160, 460])], pageRect: PAGE });
+    const result = detectFigureRegions({
+      placements: [image([100, 400, 160, 460])],
+      captions: [otherCaption],
+      pageRect: PAGE,
+    });
     assert.equal(result.regions.length, 0);
     assert.equal(result.rejected[0].reason, "image-below-area-threshold");
   });
@@ -142,7 +174,7 @@ describe("detector: rejection", () => {
   it("rejects a placement painted off the page", () => {
     const result = detectFigureRegions({
       placements: [form([90_000, 0, 90_100, 100])],
-      captions: [],
+      captions: [otherCaption],
       pageRect: PAGE,
     });
     assert.equal(result.regions.length, 0);
@@ -337,20 +369,23 @@ describe("detector: vector path placements", () => {
     assert.equal(result.regions.length, 2);
   });
 
-  it("rejects unanchored path clusters on pages without any Figure caption", () => {
+  it("skips clustering and rejects everything on pages without any Figure caption", () => {
     const result = detectFigureRegions({
-      placements: [path([50, 600, 260, 700])],
+      placements: [path([50, 600, 260, 700]), image([300, 400, 500, 600])],
       captions: [],
       pageRect: PAGE,
     });
     assert.equal(result.regions.length, 0);
+    assert.equal(result.diagnostics.skippedNoCaption, true);
+    assert.equal(result.diagnostics.pathMergePasses, 0);
     assert.equal(result.rejected.at(-1).reason, "no-figure-caption-on-page");
   });
 
   it("rejects a small path cluster below the anchored-area gate", () => {
+    const otherCaption = captionBelow("9", [400, 120, 520, 200], 8);
     const result = detectFigureRegions({
       placements: [path([50, 600, 100, 650])],
-      captions: [],
+      captions: [otherCaption],
       pageRect: PAGE,
     });
     assert.equal(result.regions.length, 0);
@@ -382,13 +417,14 @@ describe("detector: vector path placements", () => {
   });
 
   it("caps the raw path boxes and reports the truncation", () => {
+    const otherCaption = captionBelow("9", [400, 120, 520, 200], 8);
     const result = detectFigureRegions({
       placements: [
         path([50, 700, 120, 760]),
         path([250, 700, 320, 760]),
         path([450, 700, 520, 760]),
       ],
-      captions: [],
+      captions: [otherCaption],
       pageRect: PAGE,
       options: { maxPathBoxesPerPage: 2 },
     });
@@ -422,11 +458,12 @@ describe("detector: off-page path boxes and interior-caption splits", () => {
   });
 
   it("keeps a box at exactly the visible-area ratio and drops the one below it", () => {
+    const otherCaption = row("9", [400, 120, 520, 200]);
     // 100 pt of a 400 pt tall box is on the page: 0.25 is the boundary and must
     // stay, so only a strictly smaller fraction may be dropped.
     const kept = detectFigureRegions({
       placements: [path([0, -300, 100, 100])],
-      captions: [],
+      captions: [otherCaption],
       pageRect: PAGE,
     });
     assert.equal(kept.diagnostics.pathBoxesOffPage, 0);
@@ -434,7 +471,7 @@ describe("detector: off-page path boxes and interior-caption splits", () => {
 
     const dropped = detectFigureRegions({
       placements: [path([0, -302, 100, 100])],
-      captions: [],
+      captions: [otherCaption],
       pageRect: PAGE,
     });
     assert.equal(dropped.diagnostics.pathBoxesOffPage, 1);
@@ -1000,15 +1037,15 @@ describe("detector: Zotero-aligned edge, table-guard, substrate, and mixed-image
     assert.deepEqual(result.regions[0].rect, [94, 508, 510, 710]);
   });
 
-  it("accepts wide-short standalone images under the 2-of-3 Zotero size gate", () => {
-    // 400 x 18 pt? No: 400 x 21 is < 8% height. 120 x 70 = 8400/484704 = 0.0173 (< 0.02),
-    // width ratio 120/612 = 0.196 (>= 0.15) and height ratio 70/792 = 0.088 (>= 0.08) -> passes 2-of-3.
+  it("rejects uncaptioned wide-short images even when they meet size thresholds", () => {
+    const otherCaption = captionBelow("9", [400, 120, 520, 200], 8);
     const result = detectFigureRegions({
       placements: [image([100, 500, 220, 570])],
+      captions: [otherCaption],
       pageRect: PAGE,
     });
-    assert.equal(result.regions.length, 1);
-    assert.deepEqual(result.regions[0].rect, [100, 500, 220, 570]);
+    assert.equal(result.regions.length, 0);
+    assert.equal(result.rejected[0].reason, "no-figure-evidence");
   });
 
   it("coalesces dense micro-paths inside plots so later figures past maxPathBoxesPerPage are not truncated", () => {
@@ -1089,5 +1126,236 @@ describe("detector: Zotero-aligned edge, table-guard, substrate, and mixed-image
     });
     assert.equal(result.regions.length, 0);
     assert.ok(result.rejected.some((r) => r.reason === "table-or-algorithm-region"));
+  });
+
+  it("pulls in rotated Y-axis titles up to 32 pt from the spine while staying inside column margins", () => {
+    const box = [108, 600, 280, 700];
+    const result = detectFigureRegions({
+      placements: [path(box)],
+      captions: [captionBelow("1", box, 8)],
+      textItems: [
+        // 28 pt left of box[0] (= 80 >= 45 margin): gnuplot rotated Y-axis title past tick labels
+        { str: "Y", rect: [96, 610, 102, 620] },
+        { str: "Throughput (MB/s)", rect: [80, 612, 87, 688], transform: [0, 7, -7, 0, 80, 612] },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 1);
+    assert.deepEqual(result.regions[0].rect, [80, 600, 280, 700]);
+  });
+
+  it("never merges a ruled table block under a Table caption with an adjacent figure below", () => {
+    const result = detectFigureRegions({
+      placements: [
+        path([372, 573, 428, 589]),
+        path([372, 548.6, 504, 549.6]),
+        path([320, 422, 557, 530.9]),
+      ],
+      captions: [captionBelow("18", [320, 422, 557, 530.9], 10)],
+      textItems: [
+        { str: "Table 2: Latency summary.", rect: [339, 605, 536, 614] },
+        { str: "256B", rect: [377, 567, 391, 574] },
+        { str: "512B", rect: [377, 559, 391, 566] },
+        { str: "1024B", rect: [377, 551, 394, 558] },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 1);
+    assert.deepEqual(result.regions[0].rect, [320, 422, 557, 530.9]);
+  });
+
+  it("uses page typography prior so sub-body figure text stays absorbable while body prose blocks", () => {
+    const bodyTextItem = (str, y) => ({
+      str,
+      transform: [10, 0, 0, 10, 72, y],
+      width: 210,
+      height: 10,
+    });
+    const tl = analyzePageText(
+      [
+        bodyTextItem("This system processes multiple storage requests concurrently.", 300),
+        bodyTextItem("Moreover, the compaction worker threads run independently.", 286),
+        bodyTextItem("Finally, the metadata index maintains consistent versions.", 272),
+        // 8 pt diagram node phrase (narrower than column, no sentence period) must not block figures
+        {
+          str: "background log cleaner thread pipeline",
+          transform: [8, 0, 0, 8, 120, 620],
+          width: 110,
+          height: 8,
+        },
+      ],
+      [],
+      PAGE,
+      DEFAULT_DETECTOR_OPTIONS,
+    );
+    assert.equal(tl.typography.bodyFontSize, 10);
+    assert.equal(tl.proseBlockers.length, 3);
+    assert.ok(tl.labelCandidates.some((c) => c.text.includes("cleaner")));
+  });
+
+  it("keeps vertical label expansion active even after a 25 pt rotated Y-axis label expands horizontally", () => {
+    const box = [105, 606, 273, 710];
+    const result = detectFigureRegions({
+      placements: [path(box)],
+      captions: [{ number: "13", label: "Figure 13:", text: "Figure 13: GC.", rect: [72, 566, 288, 576] }],
+      textItems: [
+        // 24.8 pt left of box[0] (uses 32 pt rotated allowance)
+        { str: "Throughput (MB/s)", rect: [80.2, 629, 87, 686], transform: [0, 6.8, -6.8, 0, 80.2, 629] },
+        // Bottom X-axis title sitting below ticks at y=584..591
+        { str: "Percentage of free space", rect: [117, 584, 240, 591], transform: [6.8, 0, 0, 6.8, 117, 584] },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 1);
+    assert.deepEqual(result.regions[0].rect, [80.2, 584, 273, 710]);
+  });
+
+  it("clips a non-full-bleed wrapper frame that encloses the bottom caption line", () => {
+    const cap = { number: "16", label: "Figure 16:", text: "Figure 16: Depth.", rect: [318, 591, 558, 601] };
+    const result = detectFigureRegions({
+      placements: [path([326, 580, 554, 741])],
+      captions: [cap],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 1);
+    assert.equal(result.regions[0].captionNumber, "16");
+    assert.ok(result.regions[0].rect[1] >= 600.5, `clipped bottom ${result.regions[0].rect[1]} clears caption`);
+  });
+
+  it("links an orphaned caption to an unanchored figure inside its whitespace proposal corridor", () => {
+    const cap = { number: "7", label: "Figure 7:", text: "Figure 7: Scalability.", rect: [220, 480, 388, 490] };
+    const figBox = [90, 536, 520, 715]; // 46 pt above caption (> maxCaptionGapPt = 26)
+    const result = detectFigureRegions({
+      placements: [path(figBox)],
+      captions: [cap],
+      textItems: [
+        { str: "We evaluate scalability across six YCSB workloads in our cluster.", transform: [10, 0, 0, 10, 72, 440], width: 240, height: 10 },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(result.regions.length, 1);
+    assert.equal(result.regions[0].captionNumber, "7");
+    assert.ok(result.regions[0].evidence.includes("proposal-corridor"));
+  });
+
+  it("rejects unanchored full-bleed backdrop frames and prose-swallowing path boxes", () => {
+    const cap = captionBelow("2", [100, 620, 500, 720], 8);
+    // 1) A full-bleed white/clip frame detached from the captioned artwork must never stand alone
+    const fullBleedResult = detectFigureRegions({
+      placements: [
+        path([100, 620, 500, 720]),
+        path([90, 290, 595, 550]),
+      ],
+      captions: [cap],
+      pageRect: PAGE,
+    });
+    assert.equal(fullBleedResult.regions.length, 1);
+    assert.equal(fullBleedResult.regions[0].captionNumber, "2");
+    assert.ok(fullBleedResult.rejected.some((r) => r.reason === "unanchored-full-bleed-frame"));
+
+    // 2) An unanchored non-full-bleed background path covering body prose lines is also rejected
+    const proseBoxResult = detectFigureRegions({
+      placements: [
+        path([100, 620, 500, 720]),
+        path([90, 360, 520, 540]),
+      ],
+      captions: [cap],
+      textItems: [
+        {
+          str: "Partial copy-on-write is the most general technique for updating persistent data.",
+          transform: [9, 0, 0, 9, 95, 500],
+          width: 240,
+          height: 9,
+        },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(proseBoxResult.regions.length, 1);
+    assert.equal(proseBoxResult.regions[0].captionNumber, "2");
+    assert.ok(proseBoxResult.rejected.some((r) => r.reason === "prose-blocker-collision"));
+  });
+
+  it("rejects bottom-captioned raster table images both via captionless skip and table territory", () => {
+    const tableItems = [
+      { str: "# of servers clusters", transform: [9, 0, 0, 9, 122, 710], width: 125, height: 9 },
+      { str: "0..19 259", transform: [9, 0, 0, 9, 140, 696], width: 107, height: 9 },
+      { str: "20..49 47", transform: [9, 0, 0, 9, 136, 685], width: 111, height: 9 },
+      { str: "Table 1: Distribution of tablet servers in", transform: [10, 0, 0, 10, 72, 621], width: 225, height: 10 },
+      { str: "clusters.", transform: [9, 0, 0, 9, 72, 610], width: 30, height: 9 },
+    ];
+    const noCap = detectFigureRegions({
+      placements: [image([115, 649, 254, 706])],
+      captions: [],
+      textItems: tableItems,
+      pageRect: PAGE,
+    });
+    assert.equal(noCap.regions.length, 0);
+    assert.equal(noCap.diagnostics.skippedNoCaption, true);
+    assert.ok(noCap.rejected.some((r) => r.reason === "no-figure-caption-on-page"));
+
+    const otherCaption = captionBelow("9", [400, 120, 520, 200], 8);
+    const withFigElsewhere = detectFigureRegions({
+      placements: [image([115, 649, 254, 706])],
+      captions: [otherCaption],
+      textItems: tableItems,
+      pageRect: PAGE,
+    });
+    assert.equal(withFigElsewhere.regions.length, 0);
+    assert.ok(withFigElsewhere.rejected.some((r) => r.reason === "table-or-algorithm-region"));
+  });
+
+  it("does not treat prose references like 'Table 2 provides...' as table caption headers", () => {
+    const tl = analyzePageText(
+      [
+        {
+          str: "Table 2 provides some data about a few production instances.",
+          transform: [10, 0, 0, 10, 82, 113],
+          width: 240,
+          height: 10,
+        },
+      ],
+      [],
+      PAGE,
+      DEFAULT_DETECTOR_OPTIONS,
+    );
+    assert.equal(tl.tableCaptionRects.length, 0);
+  });
+
+  it("recovers compact wide figures anchored to an orphaned caption without rescuing thin strips", () => {
+    const cap = { number: "6", label: "Figure 6.", rect: [175, 650, 437, 660] };
+    // ByteFS-like compact wide bar chart: 504 x 54.6 pt (aspect ~9.23 > maxAspect 8),
+    // present as both a Form XObject and its inner path cluster.
+    const wide = detectFigureRegions({
+      placements: [form([54, 665.4, 558, 720]), path([54, 665.4, 558, 720])],
+      captions: [cap],
+      pageRect: PAGE,
+    });
+    assert.equal(wide.regions.length, 1);
+    assert.equal(wide.regions[0].captionNumber, "6");
+    assert.equal(wide.regions[0].kind, "multi");
+    assert.deepEqual(wide.regions[0].rect, [54, 665.4, 558, 720]);
+    assert.ok(wide.regions[0].evidence.includes("extreme-aspect-orphan-recovery"));
+    assert.equal(wide.rejected.filter((r) => r.reason === "extreme-aspect").length, 0);
+
+    // Thin decorative banner (< anchoredExtremeAspectMinSidePt 32 pt) stays rejected
+    // even directly above an orphaned Figure caption.
+    const thinStrip = detectFigureRegions({
+      placements: [form([54, 665, 558, 691])],
+      captions: [cap],
+      pageRect: PAGE,
+    });
+    assert.equal(thinStrip.regions.length, 0);
+    assert.equal(thinStrip.rejected[0].reason, "extreme-aspect");
+
+    // Once another placement already satisfies the caption, an overlapping
+    // extreme-aspect companion stays rejected.
+    const covered = detectFigureRegions({
+      placements: [form([54, 665.4, 558, 735]), path([54, 665.4, 558, 720])],
+      captions: [cap],
+      pageRect: PAGE,
+    });
+    assert.equal(covered.regions.length, 1);
+    assert.equal(covered.regions[0].kind, "form");
+    assert.equal(covered.rejected.filter((r) => r.reason === "extreme-aspect").length, 1);
   });
 });

@@ -40,7 +40,7 @@ Previously `repaintAttached()` and `onViewScaleChange()` ran all pages concurren
 
 ## 5. Test Count Synchronization — Synced
 
-After adding the auto-update manifest tests, locale toggle tests, and Zotero-aligned layout/operator tests, counts in [DEVELOPMENT.md](./DEVELOPMENT.md) and [AGENTS.md](../AGENTS.md) are synced to `449` (CI tier) and `531` (full regression). Keep both updated whenever tests are added or removed.
+After adding the auto-update manifest tests, locale toggle tests, and Zotero-aligned layout/operator tests, counts in [DEVELOPMENT.md](./DEVELOPMENT.md) and [AGENTS.md](../AGENTS.md) are synced to `461` (CI tier) and `543` (full regression). Keep both updated whenever tests are added or removed.
 
 ## 6. Unverified Items Checklist
 

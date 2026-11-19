@@ -16,11 +16,11 @@ Detection layer `src/core/`:
 
 | File | Lines | Responsibility |
 | --- | --- | --- |
-| `detector.js` | 1487 | Takes `pdf.js` `getOperatorList()` + text layout and outputs figure bounding boxes for one page; filters decorative rules, full-page frames, and ruled tables/algorithms |
-| `detector-options.js` | 167 | Single source of truth for detection thresholds and flags |
-| `text-layout.js` | 528 | Text-line prose/caption blocker classification, clear-sight geometry (`hasDirectSightValid`), page substrate filtering, standalone image gate, and 4-way label expansion |
-| `captions.js` | 206 | Caption-to-graphic region pairing |
-| `placements.js` | 475 | Maps XObjects, inline/mask images, shading fills, clip paths (`W`/`W*`), and paths onto page coordinates |
+| `detector.js` | 2076 | Takes `pdf.js` `getOperatorList()` + text layout and outputs figure bounding boxes for one page; filters decorative rules, full-page frames, and ruled tables/algorithms |
+| `detector-options.js` | 175 | Single source of truth for detection thresholds and flags |
+| `text-layout.js` | 771 | Text-line prose/caption blocker classification, typography prior, Table/Algorithm territory claiming, clear-sight geometry (`hasDirectSightValid`), page substrate filtering, standalone image gate, and 4-way label expansion |
+| `captions.js` | 239 | Caption-to-graphic region pairing |
+| `placements.js` | 490 | Maps XObjects, inline/mask images, shading fills, clip paths (`W`/`W*`), and paths onto page coordinates |
 | `cache.js` | 180 | Caches region sets scoped by `item:<itemID>\|<documentFingerprint>` so tabs never cross-contaminate |
 | `pdf-source.js` | 126 | Document fingerprinting and document-level extraction |
 | `render.js` | 110 | Converts regions into canvas rendering parameters |
@@ -100,8 +100,8 @@ Two GitHub Actions workflows (requiring only built-in `GITHUB_TOKEN`):
 
 ## Two-Tier Testing
 
-- `npm run test:ci` — Public CI tier; no copyrighted PDFs required. Runs PDF-free test files only (currently 18 files, 449 tests); `cancelled` must be 0.
-- `npm test` (`npm run test:fixture`) — Full maintainer regression (currently 25 files, 531 tests). Detection baselines rely on 5 copyrighted paper PDFs placed locally at the paths listed in [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md). When those PDFs are missing, 79 tests across 7 files are `cancelled` instead of failing, so full regression runs locally rather than as a public CI gate.
+- `npm run test:ci` — Public CI tier; no copyrighted PDFs required. Runs PDF-free test files only (currently 18 files, 461 tests); `cancelled` must be 0.
+- `npm test` (`npm run test:fixture`) — Full maintainer regression (currently 25 files, 543 tests). Detection baselines rely on 5 copyrighted paper PDFs placed locally at the paths listed in [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md). When those PDFs are missing, 79 tests across 7 files are `cancelled` instead of failing, so full regression runs locally rather than as a public CI gate.
 
 Always run tests via `npm test` or `npm run test:ci` (bare `node --test` triggers a spurious failure). Detection baselines (accepted region counts): PipeBWrite 18, FluidKV 18, Flash 10, Borges 9, plus HiKV fixtures. Whenever any threshold in `src/core/` changes, run `npm test` and verify these counts.
 

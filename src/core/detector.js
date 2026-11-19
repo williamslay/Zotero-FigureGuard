@@ -59,6 +59,43 @@ export function detectFigureRegions(input) {
     throw new TypeError("detectFigureRegions: pageRect must be a rect with positive area");
   }
 
+  // Scientific papers require a Figure/Fig. caption (or explicit /Figure tag):
+  // skip text analysis and vector clustering on pages with no figure evidence.
+  if (!captions.length && !structRegions.length) {
+    let rawPathBoxCount = 0;
+    const rejectedNoCaption = [];
+    for (let index = 0; index < rawPlacements.length; index++) {
+      const placement = rawPlacements[index];
+      if (placement?.kind === "path") rawPathBoxCount += 1;
+      rejectedNoCaption.push({
+        index,
+        kind: placement?.kind ?? "unknown",
+        rect: Array.isArray(placement?.rect) ? [...placement.rect] : null,
+        reason: "no-figure-caption-on-page",
+        confidence: 0,
+      });
+    }
+    return {
+      regions: [],
+      rejected: rejectedNoCaption,
+      diagnostics: {
+        placementCount: 0,
+        rawPlacementCount: rawPlacements.length,
+        captionCount: 0,
+        structRegionCount: 0,
+        rawPathBoxCount,
+        pathBoxCount: 0,
+        pathMergePasses: 0,
+        pathBoxesTruncated: 0,
+        pathBoxesOffPage: 0,
+        pathClusterSplits: 0,
+        textExpandedRegions: 0,
+        skippedNoCaption: true,
+        evaluated: [],
+      },
+    };
+  }
+
   const textLayout = analyzePageText(input.textItems, captions, pageRect, options);
   const substrateIndexes = findPageSubstrateIndexes(rawPlacements, pageRect, options);
   const activePlacements = rawPlacements.filter((_, index) => !substrateIndexes.has(index));
@@ -191,8 +228,21 @@ export function detectFigureRegions(input) {
           rejected.push(reject(candidate, "no-figure-caption-on-page", 0));
           continue;
         }
-        if (isInsideTableCaptionRegion(candidate.rect, textLayout, captions)) {
+        if (
+          isInsideTableCaptionRegion(candidate.rect, textLayout, captions) ||
+          territoryOwnerIndex(candidate.rect, textLayout) >= 0
+        ) {
           rejected.push(reject(candidate, "table-or-algorithm-region", 0));
+          continue;
+        }
+        // Full-bleed clip frames and paths covering prose/caption lines cannot
+        // act as unanchored standalone figures (they are backdrops over text).
+        if (candidate.fullBleedFrame) {
+          rejected.push(reject(candidate, "unanchored-full-bleed-frame", 0));
+          continue;
+        }
+        if (textLayout?.blockers?.length && blockersIntersectRect(candidate.rect, textLayout.blockers)) {
+          rejected.push(reject(candidate, "prose-blocker-collision", 0));
           continue;
         }
         const score = scoreRegion({
@@ -220,21 +270,20 @@ export function detectFigureRegions(input) {
       rejected.push(reject(candidate, "no-figure-evidence", score.confidence));
       continue;
     }
-    if (!passesStandaloneImageGate(candidate.rect, pageRect, textLayout, options)) {
-      areaRejected.push({ candidate, reason: "image-below-area-threshold" });
+    if (
+      isInsideTableCaptionRegion(candidate.rect, textLayout, captions) ||
+      territoryOwnerIndex(candidate.rect, textLayout) >= 0
+    ) {
+      rejected.push(reject(candidate, "table-or-algorithm-region", 0));
       continue;
     }
-    const score = scoreRegion({
-      kinds: candidate.sourceKinds ?? ["image"],
-      caption: null,
-      link: null,
-      rect: candidate.rect,
-      pageRect,
-      structTagged: false,
-      standaloneImage: true,
-      options,
-    });
-    regions.push(buildRegion(candidate.rect, score, 1, [candidate.index], options));
+    // Images without any Figure caption or /Figure struct tag are never
+    // accepted standalone in scholarly papers; retain only in `areaRejected`
+    // so cropped sub-images inside a captioned figure can still be absorbed.
+    const reason = passesStandaloneImageGate(candidate.rect, pageRect, textLayout, options)
+      ? "no-figure-evidence"
+      : "image-below-area-threshold";
+    areaRejected.push({ candidate, reason });
   }
 
   const merged = mergeRegions(regions.filter((region) => region.accepted));
@@ -246,10 +295,30 @@ export function detectFigureRegions(input) {
     unabsorbed,
     absorbedRejectedRegions,
     textLayout,
+    captions,
     pageRect,
     options,
   );
-  const textExpansion = expandRegionsWithLabels4Way(merged, textLayout, pageRect, options);
+  let textExpansion = expandRegionsWithLabels4Way(merged, textLayout, pageRect, options);
+  const { linkedCount: proposalLinks, recoveredIndexes } = reconcileWithCaptionProposals(
+    merged,
+    regions,
+    unabsorbed,
+    absorbedRejectedRegions,
+    evaluated,
+    captions,
+    textLayout,
+    pageRect,
+    options,
+  );
+  if (recoveredIndexes.size > 0) {
+    for (let i = rejected.length - 1; i >= 0; i--) {
+      if (recoveredIndexes.has(rejected[i].index)) rejected.splice(i, 1);
+    }
+  }
+  if (proposalLinks > 0) {
+    textExpansion += expandRegionsWithLabels4Way(merged, textLayout, pageRect, options);
+  }
 
   for (const region of regions) {
     if (region.accepted || absorbedRejectedRegions.has(region)) continue;
@@ -288,6 +357,7 @@ export function detectFigureRegions(input) {
       pathBoxesOffPage: pathMerge.diagnostics.pathBoxesOffPage,
       pathClusterSplits: pathMerge.diagnostics.pathClusterSplits,
       textExpandedRegions: textExpansion,
+      skippedNoCaption: false,
       evaluated,
     },
   };
@@ -320,7 +390,7 @@ function isThinRuleRect(rect) {
   const minS = Math.min(w, h);
   const maxS = Math.max(w, h);
   // Tiny markers/scatter dots (e.g. 1.2 x 1.3 pt) are plot glyphs, not table rules.
-  return minS <= 4 && maxS >= 12;
+  return minS <= 4 && (maxS >= 6 || maxS / Math.max(0.1, minS) >= 4);
 }
 
 function mergePathPlacements(paths, pageRect, options, captions, textLayout) {
@@ -369,7 +439,7 @@ function mergePathPlacements(paths, pageRect, options, captions, textLayout) {
   const tolerance = options.pathMergeGapDiagonalRatio * pageDiagonal(pageRect);
   let passes = 0;
   while (tolerance > 0 && passes < options.pathMergeMaxPasses && boxes.length > 1) {
-    const next = mergePass(boxes, tolerance, textLayout);
+    const next = mergePass(boxes, tolerance, textLayout, captions);
     passes += 1;
     if (next.length === boxes.length) break;
     boxes = next;
@@ -505,6 +575,7 @@ function thinRuleCanJoinCluster(thin, other, blockers, allText) {
   const h = rectHeight(thin);
   const dx = Math.max(other[0] - thin[2], thin[0] - other[2], 0);
   const dy = Math.max(other[1] - thin[3], thin[1] - other[3], 0);
+  if (Math.hypot(dx, dy) > 15) return false;
   if (h <= 4 && w >= 16 && dx > 4) return false;
   if (w <= 4 && h >= 16 && dy > 4) return false;
 
@@ -512,8 +583,76 @@ function thinRuleCanJoinCluster(thin, other, blockers, allText) {
   return true;
 }
 
+function territoryOwnerIndex(rect, textLayout) {
+  const territories = textLayout?.tableTerritories ?? [];
+  if (!territories.length) return -1;
+  const cx = (rect[0] + rect[2]) / 2;
+  const cy = (rect[1] + rect[3]) / 2;
+  const area = rectArea(rect);
+  for (let i = 0; i < territories.length; i++) {
+    const tr = territories[i].rect;
+    if (cx >= tr[0] && cx <= tr[2] && cy >= tr[1] && cy <= tr[3]) return i;
+    if (area > 0) {
+      const inter = intersectRects(rect, tr);
+      if (inter && rectArea(inter) / area >= 0.55) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Returns the index of the `Table`/`Algorithm` caption directly owning `rect`
+ * (either via an explicit `TableTerritory` occupied zone or directly beneath
+ * the caption with at most one text row above `rect[3]`), or `-1` if none.
+ */
+function directTableOwnerIndex(rect, textLayout, captions) {
+  const terrIdx = territoryOwnerIndex(rect, textLayout);
+  if (terrIdx >= 0) return 1000 + terrIdx;
+  const tableCaptions = textLayout?.tableCaptionRects ?? [];
+  if (!tableCaptions.length) return -1;
+  const prose = textLayout?.proseBlockers ?? [];
+  const allText = textLayout?.allTextRects ?? [];
+  const figCaptions = (captions ?? []).map((c) => c?.rect).filter(Boolean);
+  for (let idx = 0; idx < tableCaptions.length; idx++) {
+    const tc = tableCaptions[idx];
+    if (tc[1] < rect[3] - 4) continue;
+    const overlapX = Math.min(rect[2], tc[2]) - Math.max(rect[0], tc[0]);
+    const minW = Math.min(rectWidth(rect), rectWidth(tc));
+    if (overlapX < 0.3 * minW) continue;
+    const corridor = [
+      Math.min(rect[0], tc[0]),
+      rect[3],
+      Math.max(rect[2], tc[2]),
+      tc[1] - 2,
+    ];
+    if (corridor[3] <= corridor[1]) return idx;
+    const hasFigBetween = figCaptions.some(
+      (fc) =>
+        fc[2] >= corridor[0] &&
+        fc[0] <= corridor[2] &&
+        fc[3] >= corridor[1] &&
+        fc[1] <= corridor[3],
+    );
+    if (hasFigBetween) continue;
+    const nonTableProse = prose.filter(
+      (b) => !(b[2] >= tc[0] - 3 && b[0] <= tc[2] + 3 && b[3] >= tc[1] - 3 && b[1] <= tc[3] + 3),
+    );
+    if (blockersIntersectRect(corridor, nonTableProse)) continue;
+    const rowBuckets = new Set();
+    for (const t of allText) {
+      if (t[2] < corridor[0] || t[0] > corridor[2] || t[3] < corridor[1] || t[1] > corridor[3]) {
+        continue;
+      }
+      rowBuckets.add(Math.round(((t[1] + t[3]) / 2) / 5));
+      if (rowBuckets.size >= 2) break;
+    }
+    if (rowBuckets.size < 2) return idx;
+  }
+  return -1;
+}
+
 /** One transitive merge sweep over the current boxes. */
-function mergePass(boxes, tolerance, textLayout) {
+function mergePass(boxes, tolerance, textLayout, captions) {
   const parent = boxes.map((_, index) => index);
   const find = (index) => {
     while (parent[index] !== index) {
@@ -524,11 +663,20 @@ function mergePass(boxes, tolerance, textLayout) {
   };
   const blockers = textLayout?.proseBlockers ?? [];
   const allText = textLayout?.allTextRects ?? [];
+  const hasTableHints = Boolean(
+    textLayout?.tableCaptionRects?.length || textLayout?.tableTerritories?.length,
+  );
+  const tableOwners = hasTableHints
+    ? boxes.map((box) => directTableOwnerIndex(box.rect, textLayout, captions))
+    : null;
   for (let i = 0; i < boxes.length; i++) {
     for (let j = i + 1; j < boxes.length; j++) {
       const left = find(i);
       const right = find(j);
       if (left === right) continue;
+      if (tableOwners && (tableOwners[left] >= 0 || tableOwners[right] >= 0) && tableOwners[left] !== tableOwners[right]) {
+        continue;
+      }
       if (!gapWithin(boxes[left].rect, boxes[right].rect, tolerance)) continue;
       const bridge = unionRect(boxes[left].rect, boxes[right].rect);
       // Thin horizontal/vertical table rules separated by text rows must never
@@ -596,6 +744,9 @@ function mergeMixedGraphicComponents(placements, pageRect, textLayout, options) 
     if (a.fullBleedFrame || b.fullBleedFrame) return false;
     if (a.onlyThinRules && b.onlyThinRules) return false;
     if (a.kind === "path" && b.kind === "path") return false;
+    const tA = territoryOwnerIndex(a.rect, textLayout);
+    const tB = territoryOwnerIndex(b.rect, textLayout);
+    if ((tA >= 0 || tB >= 0) && tA !== tB) return false;
     const kinds = new Set([...a.sourceKinds, ...b.sourceKinds]);
     // Do not merge two independent standalone Forms (e.g. side-by-side subfigures
     // each with its own caption); only merge image tiles, image+path, or form+small-path.
@@ -681,6 +832,9 @@ function mergePanelGrids(boxes, pageRect, options, textLayout) {
     }
     return index;
   };
+  const terrOwners = textLayout?.tableTerritories?.length
+    ? boxes.map((box) => territoryOwnerIndex(box.rect, textLayout))
+    : null;
   for (let i = 0; i < boxes.length; i++) {
     if (!small[i]) continue;
     for (let j = i + 1; j < boxes.length; j++) {
@@ -688,6 +842,9 @@ function mergePanelGrids(boxes, pageRect, options, textLayout) {
       const left = find(i);
       const right = find(j);
       if (left === right) continue;
+      if (terrOwners && (terrOwners[left] >= 0 || terrOwners[right] >= 0) && terrOwners[left] !== terrOwners[right]) {
+        continue;
+      }
       // Peer test on the ORIGINAL panel rects: a chained group's union is
       // wider than one panel and would fail the equal-size test against the
       // next panel, stalling the sweep halfway across the grid.
@@ -763,8 +920,30 @@ function panelPeer(a, b, options) {
  * @param {object} options
  * @returns {{boxes: Array<object>, splits: number}}
  */
+function findEnclosedBottomCaptions(clusterRect, captions, options = DEFAULT_DETECTOR_OPTIONS) {
+  const minSide = options.minSidePt ?? 24;
+  const rows = [];
+  for (const caption of captions ?? []) {
+    const row = caption?.rect;
+    if (!Array.isArray(row) || row.some((value) => !Number.isFinite(value))) continue;
+    // Cluster bottom encloses the caption's bottom edge (`row[1] >= clusterRect[1] - 0.5`)
+    // with substantial artwork left above the caption (`clusterRect[3] - row[3] >= minSide`).
+    if (row[1] < clusterRect[1] - 0.5 || clusterRect[3] - row[3] < minSide) continue;
+    const overlap = intersectRects(
+      [clusterRect[0], -1e6, clusterRect[2], 1e6],
+      [row[0], -1e6, row[2], 1e6],
+    );
+    const overlapWidth = overlap ? overlap[2] - overlap[0] : 0;
+    if (overlapWidth < options.minCaptionOverlapRatio * Math.min(rectWidth(row), rectWidth(clusterRect))) {
+      continue;
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
 function splitAtInteriorCaptions(boxes, captions, pageRect, tolerance, options) {
-  if (!boxes.some((box) => (box.members?.length ?? 0) > 1)) {
+  if (!captions?.length || !boxes.some((box) => box.members?.length)) {
     return { boxes, splits: 0 };
   }
   const queue = [...boxes];
@@ -774,18 +953,21 @@ function splitAtInteriorCaptions(boxes, captions, pageRect, tolerance, options) 
   while (queue.length) {
     const cluster = queue.shift();
     const rows = findInteriorCaptionRows(cluster.rect, captions, options);
-    if (!rows.length || guard-- <= 0) {
+    const bottomEnclosed = !rows.length ? findEnclosedBottomCaptions(cluster.rect, captions, options) : [];
+    const activeRows = rows.length ? rows : bottomEnclosed;
+    if (!activeRows.length || guard-- <= 0) {
       out.push(cluster);
       continue;
     }
     // Splitting at the row closest to the cluster's vertical centre first
     // separates the two figures a caption sits between; deeper rows are found
     // by the next pass over the resulting bands.
-    const row = rows.reduce((best, other) =>
+    const row = activeRows.reduce((best, other) =>
       slabCentreDistance(cluster.rect, other) < slabCentreDistance(cluster.rect, best) ? other : best,
     );
     const bands = splitMembersAtSlab(cluster.members, row, options);
-    if (!bands[0].length || !bands[1].length) {
+    const isTrimOnly = !rows.length && !bands[0].length && bands[1].length > 0;
+    if ((!bands[0].length || !bands[1].length) && !isTrimOnly) {
       out.push(cluster);
       continue;
     }
@@ -796,7 +978,7 @@ function splitAtInteriorCaptions(boxes, captions, pageRect, tolerance, options) 
     // Anti-loss guard: a band that is too thin, or that neither links a
     // caption nor clears the anchored-area gate, was not a figure of its own;
     // merging back keeps the cluster whole.
-    if (!parts.every((part) => splitBandIsValid(part, captions, pageRect, options))) {
+    if (!parts.length || !parts.every((part) => splitBandIsValid(part, captions, pageRect, options))) {
       out.push(cluster);
       continue;
     }
@@ -1315,6 +1497,7 @@ function mergeStackedUpperBands(
   unabsorbed,
   absorbedRejectedRegions,
   textLayout,
+  captions,
   pageRect,
   options,
 ) {
@@ -1325,6 +1508,8 @@ function mergeStackedUpperBands(
   const remainingUnabsorbed = [...unabsorbed];
 
   const canAttachAbove = (base, uRect) => {
+    if (isInsideTableCaptionRegion(uRect, textLayout, captions)) return false;
+    if (territoryOwnerIndex(uRect, textLayout) >= 0) return false;
     // Only merge upper sub-bands positioned predominantly above the base's top
     // edge (never tiny components merely grazing the top edge from inside).
     const overlapInside = base.rect[3] - uRect[1];
@@ -1414,39 +1599,443 @@ function mergeStackedUpperBands(
   return remainingUnabsorbed;
 }
 
+/**
+ * Build a clean vertical proposal corridor above `cap` bounded by the first
+ * horizontal obstacle (`prose`, `tableRects`, other captions, accepted regions).
+ */
+function buildProposalCorridor(cap, propLeft, propRight, merged, textLayout, pageRect, options) {
+  const cr = cap.rect;
+  const prose = textLayout?.proseBlockers ?? [];
+  const capBlockers = textLayout?.captionBlockers ?? [];
+  const tableRects = [
+    ...(textLayout?.tableCaptionRects ?? []),
+    ...((textLayout?.tableTerritories ?? []).map((t) => t.rect)),
+  ];
+  let ceilingY = pageRect[3] - 12;
+  const obstacles = [
+    ...prose,
+    ...tableRects,
+    ...capBlockers.filter(
+      (cb) => !(cb[2] >= cr[0] - 4 && cb[0] <= cr[2] + 4 && cb[3] >= cr[1] - 4 && cb[1] <= cr[3] + 4),
+    ),
+    ...merged.filter((r) => r.caption != null).map((r) => r.rect),
+  ];
+  for (const obs of obstacles) {
+    if (obs[2] < propLeft || obs[0] > propRight) continue;
+    if (obs[1] >= cr[3] - 2 && obs[1] < ceilingY) ceilingY = obs[1];
+  }
+  if (ceilingY - cr[3] < options.minSidePt) return null;
+  return [propLeft, cr[3] - options.maxCaptionOverlapPt, propRight, ceilingY];
+}
+
+function proposalSightClear(rect, capRect, side, prose, otherCaps, tableRects) {
+  const sight =
+    side === "below"
+      ? [Math.min(rect[0], capRect[0]), rect[3], Math.max(rect[2], capRect[2]), Math.max(rect[3], capRect[1])]
+      : [Math.min(rect[0], capRect[0]), capRect[3], Math.max(rect[2], capRect[2]), Math.max(capRect[3], rect[1])];
+  if (sight[3] <= sight[1]) return true;
+  if (blockersIntersectRect(sight, prose)) return false;
+  if (blockersIntersectRect(sight, otherCaps)) return false;
+  return !tableRects.some((tr) => !(tr[0] > sight[2] || tr[2] < sight[0] || tr[1] > sight[3] || tr[3] < sight[1]));
+}
+
+function overlapsExistingRegion(rect, merged) {
+  return merged.some(
+    (r) => iou(r.rect, rect) > 0.5 || coverageOf(rect, r.rect) > 0.5 || coverageOf(r.rect, rect) > 0.5,
+  );
+}
+
+/**
+ * Recover compact wide/tall multi-panel figures (e.g. full-width strip bar
+ * charts ~504 x 54 pt) that exceeded `maxAspect` before caption matching, only
+ * when they sit directly adjacent to an otherwise orphaned Figure caption in
+ * clear sight and never belong to a Table/Algorithm or overlap an existing region.
+ */
+function recoverExtremeAspectForOrphans({
+  orphanCaptions,
+  merged,
+  evaluated,
+  captions,
+  textLayout,
+  pageRect,
+  options,
+}) {
+  const recoveredIndexes = new Set();
+  if (!orphanCaptions.length || !evaluated?.length) return { linkedCount: 0, recoveredIndexes };
+
+  const minSideFloor = options.anchoredExtremeAspectMinSidePt ?? 32;
+  const minAspectFloor = options.anchoredMinAspect ?? 0.0625;
+  const maxAspectCeil = options.anchoredMaxAspect ?? 16;
+  const prose = textLayout?.proseBlockers ?? [];
+  const capBlockers = textLayout?.captionBlockers ?? [];
+  const tableRects = [
+    ...(textLayout?.tableCaptionRects ?? []),
+    ...((textLayout?.tableTerritories ?? []).map((t) => t.rect)),
+  ];
+  const pageWidth = rectWidth(pageRect);
+  const fullLeft = pageRect[0] + 18;
+  const fullRight = pageRect[2] - 18;
+
+  const eligible = evaluated.filter(
+    (c) =>
+      c.rejectReason === "extreme-aspect" &&
+      !c.fullBleedFrame &&
+      !c.onlyThinRules &&
+      c.minSide >= minSideFloor &&
+      c.aspect >= minAspectFloor &&
+      c.aspect <= maxAspectCeil &&
+      territoryOwnerIndex(c.rect, textLayout) < 0 &&
+      !isInsideTableCaptionRegion(c.rect, textLayout, captions) &&
+      !blockersIntersectRect(c.rect, prose) &&
+      !overlapsExistingRegion(c.rect, merged),
+  );
+  if (!eligible.length) return { linkedCount: 0, recoveredIndexes };
+
+  const matches = [];
+  for (let ci = 0; ci < orphanCaptions.length; ci++) {
+    const cap = orphanCaptions[ci];
+    const otherCaps = capBlockers.filter(
+      (cb) =>
+        !(cb[2] >= cap.rect[0] - 4 && cb[0] <= cap.rect[2] + 4 && cb[3] >= cap.rect[1] - 4 && cb[1] <= cap.rect[3] + 4),
+    );
+    const wideCorridor = buildProposalCorridor(cap, fullLeft, fullRight, merged, textLayout, pageRect, options);
+    for (let ei = 0; ei < eligible.length; ei++) {
+      const cand = eligible[ei];
+      if (blockersIntersectRect(cand.rect, otherCaps)) continue;
+      const ovX = Math.min(cand.rect[2], cap.rect[2]) - Math.max(cand.rect[0], cap.rect[0]);
+      const ovRatio = ovX / Math.max(1, Math.min(rectWidth(cand.rect), rectWidth(cap.rect)));
+      if (ovRatio < options.minCaptionOverlapRatio) continue;
+
+      let side = null;
+      let gap = Infinity;
+      const aboveGap = cand.rect[1] - cap.rect[3];
+      if (
+        wideCorridor &&
+        coverageOf(cand.rect, wideCorridor) >= 0.85 &&
+        aboveGap >= -options.maxCaptionOverlapPt &&
+        aboveGap <= 48 &&
+        proposalSightClear(cand.rect, cap.rect, "above", prose, otherCaps, tableRects)
+      ) {
+        side = "above";
+        gap = Math.max(0, aboveGap);
+      } else {
+        const directLink = linkCaption(cap, cand.rect, options, pageRect);
+        if (
+          directLink?.side === "below" &&
+          directLink.gap <= options.maxCaptionGapPt &&
+          proposalSightClear(cand.rect, cap.rect, "below", prose, otherCaps, tableRects)
+        ) {
+          side = "below";
+          gap = directLink.gap;
+        }
+      }
+      if (!side) continue;
+
+      const regMid = (cand.rect[0] + cand.rect[2]) / 2;
+      const capMid = (cap.rect[0] + cap.rect[2]) / 2;
+      const centerDist = Math.abs(regMid - capMid) / Math.max(1, pageWidth);
+      const kindBonus = cand.kind === "form" || cand.kind === "image" ? 0.05 : 0;
+      const sideBonus = side === "above" ? 1 : 0;
+      const score =
+        sideBonus + ovRatio * 2.0 + Math.max(0, 1 - gap / 48) + areaRatioOf(cand.rect, pageRect) + kindBonus - centerDist * 0.5;
+      matches.push({ ci, ei, cand, cap, side, gap, score });
+    }
+  }
+  if (!matches.length) return { linkedCount: 0, recoveredIndexes };
+
+  matches.sort((a, b) => b.score - a.score);
+  const usedCaps = new Set();
+  const usedCands = new Set();
+  let linkedCount = 0;
+
+  for (const m of matches) {
+    if (usedCaps.has(m.ci) || usedCands.has(m.ei)) continue;
+    if (overlapsExistingRegion(m.cand.rect, merged)) continue;
+
+    // Coalesce coinciding extreme-aspect layers (e.g. a Form XObject and its
+    // own path cluster at identical bounds) into one multi-kind region.
+    const group = [m.ei];
+    for (let si = 0; si < eligible.length; si++) {
+      if (si === m.ei || usedCands.has(si)) continue;
+      const sib = eligible[si];
+      if (
+        iou(m.cand.rect, sib.rect) >= 0.5 ||
+        coverageOf(sib.rect, m.cand.rect) >= 0.85 ||
+        coverageOf(m.cand.rect, sib.rect) >= 0.85
+      ) {
+        group.push(si);
+      }
+    }
+
+    let rect = [...m.cand.rect];
+    const sourceKinds = [];
+    const placementIndexes = [];
+    for (const idx of group) {
+      const item = eligible[idx];
+      rect = unionRect(rect, item.rect);
+      for (const sk of item.sourceKinds ?? [item.kind]) sourceKinds.push(sk);
+      placementIndexes.push(item.index);
+    }
+
+    const score = scoreRegion({
+      kinds: sourceKinds,
+      caption: m.cap,
+      link: { gap: m.gap, side: m.side },
+      rect,
+      pageRect,
+      structTagged: false,
+      options,
+    });
+    score.evidence.push("extreme-aspect-orphan-recovery");
+    const built = buildRegion(rect, score, placementIndexes.length, placementIndexes, options);
+    if (!built.accepted) continue;
+
+    usedCaps.add(m.ci);
+    for (const idx of group) usedCands.add(idx);
+    for (const pIdx of placementIndexes) recoveredIndexes.add(pIdx);
+    merged.push(built);
+    linkedCount += 1;
+  }
+
+  return { linkedCount, recoveredIndexes };
+}
+
+/**
+ * PDFFigures 2.0-inspired caption proposal corridor + global conflict-free
+ * reconciliation for orphaned captions whose figure already exists in an
+ * unanchored region above them (e.g. multi-row panel grids with tall tick
+ * labels exceeding `maxCaptionGapPt`, or stacked unanchored upper bands inside
+ * an empty column proposal corridor), plus orphan recovery for compact
+ * wide/tall charts exceeding `maxAspect`.
+ */
+function reconcileWithCaptionProposals(
+  merged,
+  allRegions,
+  unabsorbed,
+  absorbedRejectedRegions,
+  evaluated,
+  captions,
+  textLayout,
+  pageRect,
+  options,
+) {
+  const recoveredIndexes = new Set();
+  if (!captions?.length) return { linkedCount: 0, recoveredIndexes };
+  const pageWidth = rectWidth(pageRect);
+  const midX = (pageRect[0] + pageRect[2]) / 2;
+
+  const isCaptionAlreadyCovered = (cap) => {
+    const key = captionKey(cap);
+    for (const region of merged) {
+      if (region.captionNumber != null && String(region.captionNumber) === String(cap.number)) {
+        return true;
+      }
+      if (region.captionRects?.some((cr) => Math.abs(cr[0] - cap.rect[0]) < 1 && Math.abs(cr[1] - cap.rect[1]) < 1)) {
+        return true;
+      }
+      if (!region.caption) continue;
+      const ovX = Math.min(region.rect[2], cap.rect[2]) - Math.max(region.rect[0], cap.rect[0]);
+      const minW = Math.min(rectWidth(region.rect), rectWidth(cap.rect));
+      const gap = region.rect[1] - cap.rect[3];
+      if (ovX >= options.minCaptionOverlapRatio * minW && gap >= -options.maxCaptionOverlapPt && gap <= 36) {
+        return true;
+      }
+    }
+    void key;
+    return false;
+  };
+
+  let orphanCaptions = captions.filter((cap) => !isCaptionAlreadyCovered(cap));
+  if (!orphanCaptions.length) return { linkedCount: 0, recoveredIndexes };
+
+  const prose = textLayout?.proseBlockers ?? [];
+  const capBlockers = textLayout?.captionBlockers ?? [];
+  const tableRects = [
+    ...(textLayout?.tableCaptionRects ?? []),
+    ...((textLayout?.tableTerritories ?? []).map((t) => t.rect)),
+  ];
+
+  const proposals = [];
+  if (merged?.length) {
+    for (let ci = 0; ci < orphanCaptions.length; ci++) {
+      const cap = orphanCaptions[ci];
+      const cr = cap.rect;
+      const center = (cr[0] + cr[2]) / 2;
+      const isWide =
+        rectWidth(cr) >= pageWidth * 0.45 ||
+        (cr[0] < midX - 24 && cr[2] > midX + 24) ||
+        Math.abs(center - midX) <= 36;
+      const propLeft = isWide || center < midX ? pageRect[0] + 18 : midX + 2;
+      const propRight = isWide || center >= midX ? pageRect[2] - 18 : midX - 2;
+      const corridor = buildProposalCorridor(cap, propLeft, propRight, merged, textLayout, pageRect, options);
+      if (!corridor) continue;
+      proposals.push({
+        ci,
+        cap,
+        corridor,
+        ceilingY: corridor[3],
+      });
+    }
+  }
+
+  let linkedCount = 0;
+  if (merged?.length && proposals.length) {
+    const candidates = [];
+    for (const prop of proposals) {
+      const { ci, cap, corridor } = prop;
+      const otherCaps = capBlockers.filter(
+        (cb) =>
+          !(cb[2] >= cap.rect[0] - 4 && cb[0] <= cap.rect[2] + 4 && cb[3] >= cap.rect[1] - 4 && cb[1] <= cap.rect[3] + 4),
+      );
+      for (let ri = 0; ri < merged.length; ri++) {
+        const region = merged[ri];
+        if (region.caption) continue;
+        if (territoryOwnerIndex(region.rect, textLayout) >= 0) continue;
+        if (coverageOf(region.rect, corridor) < 0.85) continue;
+        const gap = region.rect[1] - cap.rect[3];
+        if (gap < -options.maxCaptionOverlapPt || gap > 80) continue;
+        if (!proposalSightClear(region.rect, cap.rect, "above", prose, otherCaps, tableRects)) continue;
+        const ovX = Math.min(region.rect[2], cap.rect[2]) - Math.max(region.rect[0], cap.rect[0]);
+        const ovRatio = Math.max(0, ovX) / Math.max(1, Math.min(rectWidth(region.rect), rectWidth(cap.rect)));
+        const regMid = (region.rect[0] + region.rect[2]) / 2;
+        const capMid = (cap.rect[0] + cap.rect[2]) / 2;
+        const centerDist = Math.abs(regMid - capMid) / Math.max(1, pageWidth);
+        const score =
+          ovRatio * 2.0 + Math.max(0, 1 - Math.max(0, gap) / 80) + areaRatioOf(region.rect, pageRect) - centerDist * 0.5;
+        candidates.push({ ci, ri, prop, gap: Math.max(0, gap), score });
+      }
+    }
+
+    if (candidates.length) {
+      candidates.sort((a, b) => b.score - a.score);
+      const usedCaps = new Set();
+      const usedRegs = new Set();
+
+      for (const match of candidates) {
+        if (usedCaps.has(match.ci) || usedRegs.has(match.ri)) continue;
+        usedCaps.add(match.ci);
+        usedRegs.add(match.ri);
+
+        const region = merged[match.ri];
+        const { cap, corridor } = match.prop;
+        for (const rej of allRegions) {
+          if (rej.accepted || absorbedRejectedRegions.has(rej) || rej.caption) continue;
+          if (rej.rejectReason !== "below-confidence-threshold") continue;
+          if (territoryOwnerIndex(rej.rect, textLayout) >= 0) continue;
+          if (coverageOf(rej.rect, corridor) < 0.85) continue;
+          const upGap = rej.rect[1] - region.rect[3];
+          if (upGap < -2 || upGap > 48) continue;
+          const band = [
+            Math.min(region.rect[0], rej.rect[0]),
+            Math.min(region.rect[3], rej.rect[1]),
+            Math.max(region.rect[2], rej.rect[2]),
+            Math.max(region.rect[3], rej.rect[1]),
+          ];
+          if (blockersIntersectRect(band, prose)) continue;
+          if (blockersIntersectRect(rej.rect, prose)) continue;
+          region.rect = unionRect(region.rect, rej.rect);
+          region.placementCount += rej.placementCount;
+          region.placementIndexes = [...region.placementIndexes, ...rej.placementIndexes];
+          region.sourceKinds = [...new Set([...region.sourceKinds, ...(rej.sourceKinds ?? [rej.kind])])];
+          region.kind = region.sourceKinds.length > 1 ? "multi" : region.sourceKinds[0];
+          absorbedRejectedRegions.add(rej);
+        }
+
+        const updated = scoreRegion({
+          kinds: region.sourceKinds ?? [region.kind],
+          caption: cap,
+          link: { gap: match.gap, side: "above" },
+          rect: region.rect,
+          pageRect,
+          structTagged: region.evidence?.includes("struct-tree:Figure") ?? false,
+          options,
+        });
+        region.caption = updated.captionLabel;
+        region.captionNumber = updated.captionNumber;
+        region.captionRects = [cap.rect];
+        region.confidence = round(Math.max(region.confidence, updated.confidence), 3);
+        region.evidence = [...new Set([...(region.evidence ?? []), ...updated.evidence, "proposal-corridor"])];
+        linkedCount += 1;
+      }
+    }
+    orphanCaptions = captions.filter((cap) => !isCaptionAlreadyCovered(cap));
+  }
+
+  const recovered = recoverExtremeAspectForOrphans({
+    orphanCaptions,
+    merged,
+    evaluated,
+    captions,
+    textLayout,
+    pageRect,
+    options,
+  });
+  linkedCount += recovered.linkedCount;
+  for (const idx of recovered.recoveredIndexes) recoveredIndexes.add(idx);
+
+  return { linkedCount, recoveredIndexes };
+}
+
 function isInsideTableCaptionRegion(rect, textLayout, captions) {
   const tableCaptions = textLayout?.tableCaptionRects ?? [];
   if (!tableCaptions.length) return false;
   const prose = textLayout?.proseBlockers ?? [];
   const figCaptions = (captions ?? []).map((c) => c?.rect).filter(Boolean);
+  const territories = textLayout?.tableTerritories ?? [];
   for (const tc of tableCaptions) {
-    // Table/Algorithm captions usually sit above their body. If `rect` lies below
-    // a Table/Algorithm caption with horizontal overlap and no intervening Figure
-    // caption or prose block (excluding the Table caption's own blocker box), it
-    // belongs to the table rather than a figure.
-    if (tc[1] < rect[3] - 4) continue;
     const overlapX = Math.min(rect[2], tc[2]) - Math.max(rect[0], tc[0]);
     const minW = Math.min(rectWidth(rect), rectWidth(tc));
     if (overlapX < 0.3 * minW) continue;
-    const corridor = [
-      Math.min(rect[0], tc[0]),
-      rect[3],
-      Math.max(rect[2], tc[2]),
-      tc[1] - 2,
-    ];
-    if (corridor[3] <= corridor[1]) return true;
-    const hasFigBetween = figCaptions.some(
-      (fc) =>
-        fc[2] >= corridor[0] &&
-        fc[0] <= corridor[2] &&
-        fc[3] >= corridor[1] &&
-        fc[1] <= corridor[3],
-    );
-    if (hasFigBetween) continue;
     const nonTableProse = prose.filter(
       (b) => !(b[2] >= tc[0] - 3 && b[0] <= tc[2] + 3 && b[3] >= tc[1] - 3 && b[1] <= tc[3] + 3),
     );
-    if (!blockersIntersectRect(corridor, nonTableProse)) return true;
+
+    // 1) Table/Algorithm caption sits above its body.
+    if (tc[1] >= rect[3] - 4) {
+      const corridor = [
+        Math.min(rect[0], tc[0]),
+        rect[3],
+        Math.max(rect[2], tc[2]),
+        tc[1] - 2,
+      ];
+      if (corridor[3] <= corridor[1]) return true;
+      const hasFigBetween = figCaptions.some(
+        (fc) =>
+          fc[2] >= corridor[0] &&
+          fc[0] <= corridor[2] &&
+          fc[3] >= corridor[1] &&
+          fc[1] <= corridor[3],
+      );
+      if (hasFigBetween) continue;
+      if (!blockersIntersectRect(corridor, nonTableProse)) return true;
+      continue;
+    }
+
+    // 2) Bottom-captioned table (`Table N:` sits directly below the table).
+    const ownsBelow = territories.some(
+      (t) =>
+        t.direction === "below" &&
+        Math.abs(t.captionRect[0] - tc[0]) < 1 &&
+        Math.abs(t.captionRect[1] - tc[1]) < 1,
+    );
+    if (ownsBelow) continue;
+    if (rect[1] >= tc[3] - 4 && rect[1] - tc[3] <= 36) {
+      const corridor = [
+        Math.min(rect[0], tc[0]),
+        tc[3] + 2,
+        Math.max(rect[2], tc[2]),
+        rect[1],
+      ];
+      const hasFigBetween = figCaptions.some(
+        (fc) =>
+          fc[2] >= corridor[0] &&
+          fc[0] <= corridor[2] &&
+          fc[3] >= corridor[1] &&
+          fc[1] <= corridor[3],
+      );
+      if (hasFigBetween) continue;
+      if (!blockersIntersectRect(corridor, nonTableProse)) return true;
+    }
   }
   return false;
 }
