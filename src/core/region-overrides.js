@@ -6,7 +6,7 @@
  * inside the Zotero chrome sandbox.
  */
 
-import { coverageOf, iou, roundRect, toRect } from "./geom.js";
+import { coverageOf, iou, rectArea, roundRect, toRect } from "./geom.js";
 
 /** Schema version for the per-attachment persistent JSON envelope. */
 export const PERSISTENT_SCHEMA_VERSION = 1;
@@ -322,45 +322,91 @@ function sameOverrideTarget(existing, candidate) {
   return false;
 }
 
-function findMatchingAddOverrideIndex(overrides, target) {
+function findMatchingManualOverrideIndex(overrides, target, { ops = ["add"] } = {}) {
   if (!Array.isArray(overrides) || !overrides.length || target == null) return -1;
+  const opSet = new Set(ops);
   if (typeof target === "string") {
     const id = target.trim();
-    return overrides.findIndex((o) => o.op === "add" && o.id === id);
+    return overrides.findIndex((o) => opSet.has(o.op) && o.id === id);
   }
   if (target && typeof target === "object" && !Array.isArray(target)) {
-    const id = target.overrideId ?? target.id ?? null;
-    if (typeof id === "string" && id.trim()) {
-      const idx = overrides.findIndex((o) => o.op === "add" && o.id === id.trim());
+    const overrideId = typeof target.overrideId === "string" ? target.overrideId.trim() : null;
+    if (overrideId) {
+      const idx = overrides.findIndex((o) => opSet.has(o.op) && o.id === overrideId);
+      if (idx !== -1) return idx;
+    }
+    const id = typeof target.id === "string" ? target.id.trim() : null;
+    if (id) {
+      const idx = overrides.findIndex((o) => opSet.has(o.op) && o.id === id);
       if (idx !== -1) return idx;
     }
   }
   const rect = Array.isArray(target) ? validateBBox(target) : validateBBox(target?.rect);
   if (rect) {
-    return overrides.findIndex((o) => o.op === "add" && iou(o.rect, rect) >= 0.95);
+    return overrides.findIndex((o) => opSet.has(o.op) && o.rect && iou(o.rect, rect) >= 0.95);
+  }
+  return -1;
+}
+
+function findExplicitAddTargetIndex(overrides, target) {
+  if (!Array.isArray(overrides) || !overrides.length || target == null) return -1;
+  if (typeof target === "string") {
+    const id = target.trim();
+    return id ? overrides.findIndex((o) => o.op === "add" && o.id === id) : -1;
+  }
+  if (target && typeof target === "object" && !Array.isArray(target)) {
+    const overrideId = typeof target.overrideId === "string" ? target.overrideId.trim() : null;
+    if (overrideId) {
+      const idx = overrides.findIndex((o) => o.op === "add" && o.id === overrideId);
+      if (idx !== -1) return idx;
+    }
+    const id = typeof target.id === "string" ? target.id.trim() : null;
+    if (id) {
+      const idx = overrides.findIndex((o) => o.op === "add" && o.id === id);
+      if (idx !== -1) return idx;
+    }
+    if (target.origin === "manual-add") {
+      const rect = validateBBox(target.rect);
+      if (rect) {
+        const idx = overrides.findIndex((o) => o.op === "add" && o.rect && iou(o.rect, rect) >= 0.95);
+        if (idx !== -1) return idx;
+      }
+    }
   }
   return -1;
 }
 
 /**
  * Purely inserts or updates a `suppress` override for a page's override list.
- * If `target` identifies an existing manual `"add"` override directly (and not
- * an auto region), removes that manual addition cleanly.
+ * If `target` identifies an existing manual `"add"` override directly (or an
+ * unmatched `"replace"` fallback without a backing auto region), removes that
+ * manual entry cleanly instead of creating a bogus `suppress` record.
  */
 export function upsertSuppressOverride(overrides, target, { autoRegions = [], now } = {}) {
   const list = Array.isArray(overrides)
     ? overrides.map(normalizeOverrideEntry).filter(Boolean)
     : [];
+  const explicitAddIdx = findExplicitAddTargetIndex(list, target);
+  if (explicitAddIdx !== -1) {
+    const [removed] = list.splice(explicitAddIdx, 1);
+    return { ok: true, action: "removed-add", override: removed, overrides: list };
+  }
+
   const auto = serializeAutoRegions(autoRegions);
   const descriptor = normalizeTargetDescriptor(target, auto);
   const ts = nextTimestamp(now);
 
   const matchedAuto = descriptor ? matchOverrideTarget(descriptor, auto) : -1;
   if (matchedAuto === -1) {
-    const addIdx = findMatchingAddOverrideIndex(list, target);
-    if (addIdx !== -1) {
-      const [removed] = list.splice(addIdx, 1);
-      return { ok: true, action: "removed-add", override: removed, overrides: list };
+    const manualIdx = findMatchingManualOverrideIndex(list, target, { ops: ["add", "replace"] });
+    if (manualIdx !== -1) {
+      const [removed] = list.splice(manualIdx, 1);
+      return {
+        ok: true,
+        action: removed.op === "add" ? "removed-add" : "removed-replace",
+        override: removed,
+        overrides: list,
+      };
     }
   }
 
@@ -382,8 +428,8 @@ export function upsertSuppressOverride(overrides, target, { autoRegions = [], no
 
 /**
  * Purely inserts or updates a `replace` override for a page's override list.
- * If `target` names an existing manual `"add"` override, updates that addition's
- * bounding box in place.
+ * If `target` names an existing manual `"add"` override (or an unmatched
+ * `"replace"` fallback), updates that entry's bounding box in place.
  */
 export function upsertReplaceOverride(overrides, target, newRect, { autoRegions = [], now } = {}) {
   const list = Array.isArray(overrides)
@@ -394,21 +440,37 @@ export function upsertReplaceOverride(overrides, target, newRect, { autoRegions 
     return { ok: false, reason: "invalid-rect", overrides: list };
   }
 
+  const ts = nextTimestamp(now);
+  const explicitAddIdx = findExplicitAddTargetIndex(list, target);
+  if (explicitAddIdx !== -1) {
+    const updated = {
+      ...list[explicitAddIdx],
+      rect: validRect,
+      updatedAt: ts,
+    };
+    list[explicitAddIdx] = updated;
+    return { ok: true, action: "update-add", override: updated, overrides: list };
+  }
+
   const auto = serializeAutoRegions(autoRegions);
   const descriptor = normalizeTargetDescriptor(target, auto);
-  const ts = nextTimestamp(now);
 
   const matchedAuto = descriptor ? matchOverrideTarget(descriptor, auto) : -1;
   if (matchedAuto === -1) {
-    const addIdx = findMatchingAddOverrideIndex(list, target);
-    if (addIdx !== -1) {
+    const manualIdx = findMatchingManualOverrideIndex(list, target, { ops: ["add", "replace"] });
+    if (manualIdx !== -1) {
       const updated = {
-        ...list[addIdx],
+        ...list[manualIdx],
         rect: validRect,
         updatedAt: ts,
       };
-      list[addIdx] = updated;
-      return { ok: true, action: "update-add", override: updated, overrides: list };
+      list[manualIdx] = updated;
+      return {
+        ok: true,
+        action: updated.op === "add" ? "update-add" : "replace",
+        override: updated,
+        overrides: list,
+      };
     }
   }
 
@@ -542,6 +604,107 @@ export function removeOverride(overrides, overrideIdOrTarget, { autoRegions = []
   }
 
   return { ok: true, removed, removedCount: removed.length, overrides: remaining };
+}
+
+function toPoint(point) {
+  if (Array.isArray(point) || ArrayBuffer.isView(point)) {
+    const x = Number(point[0]);
+    const y = Number(point[1]);
+    return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+  }
+  if (point && typeof point === "object") {
+    const x = Number(point.x ?? point[0]);
+    const y = Number(point.y ?? point[1]);
+    return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+  }
+  return null;
+}
+
+function pointInRectWithTolerance(pt, rect, tol) {
+  return (
+    pt[0] >= rect[0] - tol &&
+    pt[0] <= rect[2] + tol &&
+    pt[1] >= rect[1] - tol &&
+    pt[1] <= rect[3] + tol
+  );
+}
+
+/**
+ * Finds the best effective region containing a PDF user-space point.
+ * Overlapping candidates prefer manual regions (`manual-add`, `manual-replace`)
+ * over auto regions, then smaller bounding-box area.
+ *
+ * @param {number[]|{x:number,y:number}} point
+ * @param {Array<object>} regions
+ * @param {{tolerance?: number}} [options]
+ * @returns {{region: object, index: number, rect: number[], isManual: boolean, area: number}|null}
+ */
+export function hitTestRegions(point, regions, { tolerance = 0 } = {}) {
+  const pt = toPoint(point);
+  if (!pt || !Array.isArray(regions) || !regions.length) return null;
+  const tol = Math.max(0, Number.isFinite(Number(tolerance)) ? Number(tolerance) : 0);
+
+  let best = null;
+  for (let i = 0; i < regions.length; i += 1) {
+    const region = regions[i];
+    const rect = validateBBox(region?.rect ?? region);
+    if (!rect || !pointInRectWithTolerance(pt, rect, tol)) continue;
+    const isManual =
+      region?.origin === "manual-add" ||
+      region?.origin === "manual-replace" ||
+      Boolean(region?.manual || region?.overrideId);
+    const area = rectArea(rect);
+    if (!best) {
+      best = { region, index: i, rect, isManual, area };
+      continue;
+    }
+    if (isManual !== best.isManual) {
+      if (isManual) best = { region, index: i, rect, isManual, area };
+      continue;
+    }
+    if (area < best.area - 1e-6) {
+      best = { region, index: i, rect, isManual, area };
+      continue;
+    }
+    if (Math.abs(area - best.area) <= 1e-6) {
+      const id = String(region?.id ?? "");
+      const bestId = String(best.region?.id ?? "");
+      if (id && (!bestId || id < bestId)) {
+        best = { region, index: i, rect, isManual, area };
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Finds the suppressed region whose saved original bounding box contains `point`,
+ * allowing right-click recovery of previously suppressed figures.
+ *
+ * @param {number[]|{x:number,y:number}} point
+ * @param {{overrides?: Array<object>, autoRegions?: Array<object>, tolerance?: number}} [options]
+ * @returns {{override: object, rect: number[], autoRegion: object|null, area: number}|null}
+ */
+export function findSuppressedTargetAtPoint(point, { overrides = [], autoRegions = [], tolerance = 0 } = {}) {
+  const pt = toPoint(point);
+  if (!pt || !Array.isArray(overrides) || !overrides.length) return null;
+  const tol = Math.max(0, Number.isFinite(Number(tolerance)) ? Number(tolerance) : 0);
+  const auto = serializeAutoRegions(autoRegions);
+
+  let best = null;
+  for (const raw of overrides) {
+    const override = normalizeOverrideEntry(raw);
+    if (!override || override.op !== "suppress") continue;
+    const matchedIdx = auto.length ? matchOverrideTarget(override, auto) : -1;
+    const autoRegion = matchedIdx !== -1 ? auto[matchedIdx] : null;
+    const rect = validateBBox(override.targetOriginalRect) ?? (autoRegion ? [...autoRegion.rect] : null);
+    if (!rect || !pointInRectWithTolerance(pt, rect, tol)) continue;
+    const area = rectArea(rect);
+    if (!best || area < best.area - 1e-6) {
+      best = { override, rect, autoRegion, area };
+    }
+  }
+  return best;
 }
 
 /**

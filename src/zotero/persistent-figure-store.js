@@ -1023,6 +1023,49 @@ export class PersistentFigureStore {
   }
 
   /**
+   * Synchronous in-memory read of cached auto regions and manual overrides for
+   * one page when the attachment record is already loaded in memory. Never runs
+   * disk IO or detection (used by synchronous context-menu construction).
+   */
+  getPageStateSync(identityInput, pageNumber) {
+    const pageKey = normalizePageNumberKey(pageNumber);
+    const norm = normalizeAttachmentIdentity(identityInput);
+    if (!pageKey || !norm) {
+      return {
+        loaded: false,
+        hit: false,
+        autoRegions: [],
+        overrides: [],
+        overrideVersion: 0,
+        autoEpoch: 0,
+      };
+    }
+    const entry = this.entries.get(norm.storageKey);
+    if (!entry?.record || !documentMatches(entry.record.document, norm)) {
+      return {
+        loaded: false,
+        hit: false,
+        autoRegions: [],
+        overrides: [],
+        overrideVersion: entry?.overrideVersion ?? 0,
+        autoEpoch: entry?.autoEpoch ?? 0,
+      };
+    }
+    const autoEntry = entry.record.autoCache.pages[pageKey] ?? null;
+    const hit = Boolean(autoEntry && autoEntry.complete === true);
+    return {
+      loaded: true,
+      hit,
+      autoRegions: hit
+        ? autoEntry.regions.map((r) => ({ ...r, rect: [...r.rect], sourceKinds: [...r.sourceKinds] }))
+        : [],
+      overrides: clonePageOverrides(entry.record, pageKey),
+      overrideVersion: entry.overrideVersion,
+      autoEpoch: entry.autoEpoch,
+    };
+  }
+
+  /**
    * Resolves effective regions (auto + manual overrides) for a known array of
    * auto regions without re-running detection.
    */

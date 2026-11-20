@@ -4,6 +4,8 @@ import {
   DETECTOR_CACHE_REVISION,
   PERSISTENT_SCHEMA_VERSION,
   appendAddOverride,
+  findSuppressedTargetAtPoint,
+  hitTestRegions,
   matchOverrideTarget,
   normalizeOverrideEntry,
   regionIdFor,
@@ -272,5 +274,91 @@ describe("region-overrides: pure resolveEffectiveRegions (Test F)", () => {
     const single = regionIdFor(autoFig2, 0);
     const reordered = serializeAutoRegions([autoFig1, autoFig2, autoFig3]);
     assert.equal(reordered[1].id, single);
+  });
+
+  it("hit-tests effective regions prioritizing manual overrides first, then smaller area", () => {
+    const regions = [
+      { id: "auto-big", origin: "auto", rect: [50, 50, 400, 400] },
+      { id: "auto-small", origin: "auto", rect: [100, 100, 220, 220] },
+      { id: "ovr-manual", overrideId: "ovr-manual", origin: "manual-add", rect: [120, 120, 350, 350] },
+    ];
+    // Point inside all three: manual region wins over smaller auto-small.
+    const hitManual = hitTestRegions([150, 150], regions);
+    assert.equal(hitManual?.region.id, "ovr-manual");
+    assert.equal(hitManual?.isManual, true);
+
+    // Point inside auto-big and auto-small only: smaller auto-small wins.
+    const hitSmallAuto = hitTestRegions([110, 110], regions);
+    assert.equal(hitSmallAuto?.region.id, "auto-small");
+    assert.equal(hitSmallAuto?.isManual, false);
+
+    // Point strictly outside with 0 tolerance misses, succeeds with tolerance=2.
+    assert.equal(hitTestRegions([49, 200], regions), null);
+    assert.equal(hitTestRegions([49, 200], regions, { tolerance: 2 })?.region.id, "auto-big");
+  });
+
+  it("locates suppressed auto figures by saved original rect and auto fallback", () => {
+    const auto = serializeAutoRegions([autoFig1, autoFig2]);
+    const overrides = [
+      normalizeOverrideEntry({
+        id: "ovr-sup-1",
+        op: "suppress",
+        targetRegionId: auto[0].id,
+        targetOriginalRect: auto[0].rect,
+      }),
+      normalizeOverrideEntry({
+        id: "ovr-sup-2",
+        op: "suppress",
+        targetRegionId: auto[1].id,
+      }),
+    ];
+    const hit1 = findSuppressedTargetAtPoint([150, 520], { overrides, autoRegions: [] });
+    assert.equal(hit1?.override.id, "ovr-sup-1");
+    assert.deepEqual(hit1?.rect, auto[0].rect);
+
+    const hit2 = findSuppressedTargetAtPoint([150, 240], { overrides, autoRegions: auto });
+    assert.equal(hit2?.override.id, "ovr-sup-2");
+    assert.deepEqual(hit2?.rect, auto[1].rect);
+
+    assert.equal(findSuppressedTargetAtPoint([450, 500], { overrides, autoRegions: auto }), null);
+  });
+
+  it("edits and removes manual-add (even overlapping auto) and unmatched replace overrides in-place without duplicates", () => {
+    const auto = serializeAutoRegions([autoFig1]);
+    // Manual add intentionally sitting right over autoFig1.
+    const added = appendAddOverride([], [...autoFig1.rect], { allowDuplicate: true });
+    const addEff = resolveEffectiveRegions(auto, added.overrides).regions.find((r) => r.origin === "manual-add");
+    assert.ok(addEff);
+
+    // Re-adjusting that manual-add targets ONLY the manual add without replacing autoFig1.
+    const repAdd = upsertReplaceOverride(added.overrides, addEff, [90, 460, 310, 660], { autoRegions: auto });
+    assert.equal(repAdd.action, "update-add");
+    assert.equal(repAdd.overrides.length, 1);
+    assert.equal(repAdd.overrides[0].id, addEff.overrideId);
+
+    // Removing protection on that manual-add removes it cleanly without creating a suppress entry.
+    const supAdd = upsertSuppressOverride(repAdd.overrides, { ...addEff, rect: [90, 460, 310, 660] }, { autoRegions: auto });
+    assert.equal(supAdd.action, "removed-add");
+    assert.equal(supAdd.overrides.length, 0);
+
+    // Unmatched replace fallback updates in place on repeat edit and deletes cleanly on suppress.
+    const orphanReplace = [
+      normalizeOverrideEntry({
+        id: "ovr-orphan-r",
+        op: "replace",
+        targetRegionId: "missing-auto",
+        targetOriginalRect: [20, 20, 120, 120],
+        rect: [25, 25, 130, 130],
+      }),
+    ];
+    const orphanEff = resolveEffectiveRegions([], orphanReplace).regions[0];
+    const repOrphan = upsertReplaceOverride(orphanReplace, orphanEff, [30, 30, 150, 150], { autoRegions: [] });
+    assert.equal(repOrphan.overrides.length, 1);
+    assert.equal(repOrphan.overrides[0].id, "ovr-orphan-r");
+    assert.deepEqual(repOrphan.overrides[0].rect, [30, 30, 150, 150]);
+
+    const supOrphan = upsertSuppressOverride(repOrphan.overrides, { ...orphanEff, rect: [30, 30, 150, 150] }, { autoRegions: [] });
+    assert.equal(supOrphan.action, "removed-replace");
+    assert.equal(supOrphan.overrides.length, 0);
   });
 });

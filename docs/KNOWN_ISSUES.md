@@ -40,10 +40,11 @@ Previously `repaintAttached()` and `onViewScaleChange()` ran all pages concurren
 
 ## 5. Test Count Synchronization — Synced
 
-After adding the bootstrap uninstall/Undo cleanup, persistent figure cache, manual override store, auto-update manifest tests, locale toggle tests, and Zotero-aligned layout/operator tests, counts in [DEVELOPMENT.md](./DEVELOPMENT.md) and [AGENTS.md](../AGENTS.md) are synced to `507` (CI tier) and `589` (full regression). Keep both updated whenever tests are added or removed.
+After adding the bootstrap uninstall/Undo cleanup, persistent figure cache, manual override store, manual figure editing (context menu + interactive 4-corner adjust/draw UI), auto-update manifest tests, locale toggle tests, and Zotero-aligned layout/operator tests, counts in [DEVELOPMENT.md](./DEVELOPMENT.md) and [AGENTS.md](../AGENTS.md) are synced to `521` (CI tier) and `603` (full regression). Keep both updated whenever tests are added or removed.
 
 ## 6. Unverified Items Checklist
 
+- Manual Figure Editing (`createViewContextMenu` hit testing, 4-corner handle adjust, manual draw-add, remove/reset, right-click recovery of suppressed figures, DPI/zoom/rotation alignment) on real Zotero 10.0.8 desktop UI.
 - The "release already exists" guard branch in the Release workflow has not yet been triggered in practice.
 - Add-on list icon rendering on real hardware (`manifest.json` `icons` pointing to `content/figureguard-icon.svg`).
 - Page-by-page verification of HiKV figures 7/8/9.

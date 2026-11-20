@@ -3,8 +3,8 @@
  * the sandbox global `FigureGuard`.
  *
  * Responsibilities:
- *   - register the single plugin-visible reader event ("renderToolbar"), which
- *     is where the toolbar toggle is mounted,
+ *   - register the plugin's Zotero reader events ("renderToolbar" and
+ *     "createViewContextMenu"),
  *   - keep one ReaderSession per open reader,
  *   - own the shared RegionCache, so detection results survive toggling,
  *   - tear everything down on shutdown.
@@ -16,6 +16,7 @@
 import { CORE_VERSION, RegionCache, resolveEffectiveRegions, serializeAutoRegions } from "../core/index.js";
 import { resetWarnOnce, warnOnce, getWarnLog, resolveDocumentId, realmStamp } from "./overlay.js";
 import { PersistentFigureStore, normalizeAttachmentIdentity } from "./persistent-figure-store.js";
+import { resolveEditorStrings } from "./region-editor.js";
 import { probeOverlay } from "./paint-probe.js";
 import {
   ReaderSession,
@@ -30,8 +31,11 @@ import {
 /** Extension id; must match manifest.json. */
 export const PLUGIN_ID = "figure-guard@zotero.org";
 
-/** The only Zotero reader event this plugin listens to. */
+/** Reader toolbar extension event handled synchronously by `onRenderToolbar`. */
 export const TOOLBAR_EVENT = "renderToolbar";
+
+/** Reader context menu extension event handled synchronously by `onCreateViewContextMenu`. */
+export const CONTEXT_MENU_EVENT = "createViewContextMenu";
 
 /** Firefox topics used to notice reader windows appearing or closing. */
 export const WINDOW_TOPICS = ["domwindowopened", "domwindowclosed"];
@@ -178,8 +182,8 @@ const sessions = new Map();
 const buttonLinks = new Map();
 /** @type {Array<object|null>} Registered window observers. */
 const observers = [];
-/** @type {string[]} Registered Zotero.Reader event types. */
-let registeredEventTypes = [];
+/** @type {Array<{type: string, handler: Function}>} Registered Zotero.Reader listeners. */
+let registeredEventListeners = [];
 /** Handle of the Zotero `tab` notifier, which is not a window observer. */
 let zoteroNotifierId = null;
 let started = false;
@@ -651,6 +655,16 @@ function ensureSession(reader) {
       persistentStore,
       tag: tagFor(reader),
       enabled,
+      isChineseLocale: (doc) => isChineseLocale(resolveZoteroLocale(doc)),
+      onEditorCommit: ({ mode, pageNumber, region, pdfRect }) => {
+        if (mode === "adjust" && region) {
+          return replaceRegion(session, pageNumber, region, pdfRect);
+        }
+        if (mode === "add") {
+          return addRegion(session, pageNumber, pdfRect);
+        }
+        return Promise.resolve({ ok: false, persisted: false, reason: "unsupported-mode" });
+      },
     });
   } catch (err) {
     warnOnce("session-ctor", err);
@@ -1168,6 +1182,125 @@ function removeZoteroNotifier() {
   zoteroNotifierId = null;
 }
 
+function findSessionForReader(reader) {
+  if (!reader) return null;
+  const direct = sessions.get(reader)?.session ?? null;
+  if (direct) return direct;
+  let readerTab = null;
+  try {
+    readerTab = reader.tabID ?? null;
+  } catch {
+    readerTab = null;
+  }
+  if (readerTab === undefined || readerTab === null) return null;
+  for (const entry of sessions.values()) {
+    const s = entry?.session;
+    if (!s || s.destroyed) continue;
+    try {
+      if (s.reader?.tabID === readerTab) return s;
+    } catch {
+      // Ignore unreadable tabID across Xray wrappers.
+    }
+  }
+  return null;
+}
+
+/**
+ * Zotero `createViewContextMenu` handler. Resolves the right-clicked page point
+ * against effective figure regions (or previously suppressed regions) and appends
+ * plain `{label, onCommand}` menu items synchronously without replacing Zotero's
+ * native menu entries.
+ *
+ * @param {object} event
+ */
+export function onCreateViewContextMenu(event) {
+  try {
+    if (!event || typeof event.append !== "function") return;
+    const session = findSessionForReader(event.reader);
+    if (!session || session.destroyed || !session.enabled) return;
+    session.syncDocumentId?.();
+    if (!persistentStore || !session.resolveSyncIdentity?.()) return;
+
+    const resolved = session.resolveContextHit?.(event.params ?? {});
+    if (!resolved || !resolved.pageNumber || !resolved.pageView) return;
+
+    const docForLocale =
+      event.doc ??
+      session.reader?._iframeWindow?.document ??
+      resolved.pageView.div?.ownerDocument ??
+      session.innerWin?.document ??
+      null;
+    const strings = resolveEditorStrings(isChineseLocale(resolveZoteroLocale(docForLocale)));
+    const { pageNumber, pageView, hit, suppressedHit } = resolved;
+    const items = [];
+
+    const runMenuMutation = async (fn) => {
+      try {
+        const res = await fn();
+        if (!res?.ok) {
+          session.editor?.showNotice(strings.commitFailed, pageView);
+        } else if (res.persisted === false) {
+          session.editor?.showNotice(strings.persistFailed, pageView);
+        }
+      } catch (err) {
+        warnOnce("context-menu-mutation", err);
+        session.editor?.showNotice(strings.commitFailed, pageView);
+      }
+    };
+
+    if (hit?.region) {
+      const region = hit.region;
+      items.push({
+        label: strings.menuAdjust,
+        onCommand: () => {
+          try {
+            session.startAdjustRegion({ pageNumber, pageView, region });
+          } catch (err) {
+            warnOnce("context-adjust", err);
+          }
+        },
+      });
+      items.push({
+        label: strings.menuRemove,
+        onCommand: () => {
+          void runMenuMutation(() => suppressRegion(session, pageNumber, region));
+        },
+      });
+      if (region.overrideId) {
+        items.push({
+          label: strings.menuReset,
+          onCommand: () => {
+            void runMenuMutation(() => resetOverride(session, pageNumber, region.overrideId ?? region));
+          },
+        });
+      }
+    } else if (suppressedHit?.override) {
+      const overrideId = suppressedHit.override.id;
+      items.push({
+        label: strings.menuReset,
+        onCommand: () => {
+          void runMenuMutation(() => resetOverride(session, pageNumber, overrideId));
+        },
+      });
+    }
+
+    items.push({
+      label: strings.menuAdd,
+      onCommand: () => {
+        try {
+          session.startAddRegion({ pageNumber, pageView });
+        } catch (err) {
+          warnOnce("context-add", err);
+        }
+      },
+    });
+
+    if (items.length) event.append(...items);
+  } catch (err) {
+    warnOnce("create-view-context-menu", err);
+  }
+}
+
 /**
  * Called from bootstrap.js after the bundle has been loaded.
  *
@@ -1191,10 +1324,16 @@ export function startup(data = {}) {
     }
     try {
       readerAPI.registerEventListener(TOOLBAR_EVENT, onRenderToolbar, data?.id || PLUGIN_ID);
-      registeredEventTypes = [TOOLBAR_EVENT];
+      registeredEventListeners = [{ type: TOOLBAR_EVENT, handler: onRenderToolbar }];
     } catch (err) {
       warnOnce("register-toolbar-event", err);
       return;
+    }
+    try {
+      readerAPI.registerEventListener(CONTEXT_MENU_EVENT, onCreateViewContextMenu, data?.id || PLUGIN_ID);
+      registeredEventListeners.push({ type: CONTEXT_MENU_EVENT, handler: onCreateViewContextMenu });
+    } catch (err) {
+      warnOnce("register-context-menu-event", err);
     }
 
     const win0 = (() => {
@@ -1266,14 +1405,14 @@ export function shutdown(options = {}) {
     removeZoteroNotifier();
 
     const readerAPI = getZotero()?.Reader ?? null;
-    for (const type of registeredEventTypes) {
+    for (const { type, handler } of registeredEventListeners) {
       try {
-        readerAPI?.unregisterEventListener?.(type, onRenderToolbar);
+        readerAPI?.unregisterEventListener?.(type, handler);
       } catch (err) {
         warnOnce("unregister-event", err, type);
       }
     }
-    registeredEventTypes = [];
+    registeredEventListeners = [];
 
     for (const [, entry] of [...sessions]) {
       if (!entry.session.destroyed) closeSession(entry.session);
@@ -1404,13 +1543,19 @@ function syncSessionsAfterOverride(matchedSessions, pageNumber, result) {
     try {
       const key = session.cacheKey?.();
       const cached = key ? session.regionCache?.get?.(key, pageNum) : null;
-      if (cached && cached.autoRegions !== undefined && result.effective) {
-        session.regionCache.set(key, pageNum, {
-          ...cached,
-          regions: result.effective.regions,
-          overrideVersion: result.overrideVersion ?? cached.overrideVersion,
-          autoEpoch: result.autoEpoch ?? cached.autoEpoch,
-        });
+      if (cached && cached.autoRegions !== undefined) {
+        const effective =
+          result.overrides !== undefined
+            ? resolveEffectiveRegions(cached.autoRegions, result.overrides)
+            : result.effective;
+        if (effective) {
+          session.regionCache.set(key, pageNum, {
+            ...cached,
+            regions: effective.regions,
+            overrideVersion: result.overrideVersion ?? cached.overrideVersion,
+            autoEpoch: result.autoEpoch ?? cached.autoEpoch,
+          });
+        }
       }
       session.refreshPageOverlay?.(pageNum, { forceDetect: false });
     } catch (err) {

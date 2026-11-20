@@ -22,9 +22,17 @@
  */
 
 import { PageOverlay, isProvisionalDocumentId, resolveDocumentId, warnOnce } from "./overlay.js";
-import { resolveAttachmentIdentity } from "./persistent-figure-store.js";
+import { normalizeAttachmentIdentity, resolveAttachmentIdentity } from "./persistent-figure-store.js";
+import { RegionEditorController } from "./region-editor.js";
 import { createZoomWatcher } from "./zoom.js";
 import { scopedDocumentId } from "../core/cache.js";
+import {
+  findSuppressedTargetAtPoint,
+  hitTestRegions,
+  resolveEffectiveRegions,
+  serializeAutoRegions,
+} from "../core/region-overrides.js";
+import { clientPointToViewportPoint, toPdfPoint } from "../core/viewport.js";
 
 /** Readiness poll interval, in milliseconds. */
 export const READY_POLL_MS = 250;
@@ -637,6 +645,8 @@ export class ReaderSession {
     resolveAttachmentMeta = null,
     tag = "",
     enabled = true,
+    isChineseLocale = null,
+    onEditorCommit = null,
   }) {
     this.reader = reader;
     this.regionCache = regionCache;
@@ -646,6 +656,12 @@ export class ReaderSession {
     this.identityPromises = new Map();
     this.tag = tag;
     this.enabled = Boolean(enabled);
+    this.isChineseLocale = typeof isChineseLocale === "function" ? isChineseLocale : () => false;
+    this.editor = new RegionEditorController({
+      isChinese: (doc) => this.isChineseLocale(doc ?? this.reader?._iframeWindow?.document ?? this.innerWin?.document),
+      onCommit: onEditorCommit,
+      onStateChange: () => this.notify(),
+    });
     /** @type {Map<number, PageOverlay>} Page number to overlay group. */
     this.overlays = new Map();
     /** @type {Set<Promise<void>>} Paint jobs, so teardown can wait conceptually. */
@@ -829,6 +845,8 @@ export class ReaderSession {
     // the event bus was not up yet there were no document-change events to
     // learn it from, so this is the first reliable chance.
     this.syncDocumentId();
+    this.syncEditorContextRealm();
+    void this.warmPersistentStore();
     if (!this.eventBus) {
       this.eventBus = resolveEventBus(this.innerWin, this.tag);
       if (this.eventBus) this.bindEvents();
@@ -1066,6 +1084,7 @@ export class ReaderSession {
     this.paintEpoch += 1;
     this.workPausedInBackground = true;
     this.paintOnSelectPending = true;
+    this.editor?.cancel("tab-switch");
     if (this.documentCheckTimer !== null) {
       clearTimeout(this.documentCheckTimer);
       this.timers.delete(this.documentCheckTimer);
@@ -1091,6 +1110,7 @@ export class ReaderSession {
 
   onTabActivate({ paint = true } = {}) {
     if (this.destroyed) return;
+    this.syncEditorContextRealm();
     this.ensureCurrentDocument("tab-activate");
     if (!paint) {
       this.pauseBackgroundWork();
@@ -1242,7 +1262,10 @@ export class ReaderSession {
     this.identityPromises.clear();
     this.regionCache.invalidateDocument(staleKey);
     this.lastStaleKey = staleKey;
+    this.editor?.cancel("rekeyed");
     this.detachAll();
+    this.syncEditorContextRealm();
+    void this.warmPersistentStore();
     void this.repaintAttached();
     // Same race as a document swap: the canvases this pass rebuilds can land while
     // the viewer is still laying out, so the page gets its own settled re-check.
@@ -1331,6 +1354,8 @@ export class ReaderSession {
     const previous = this.innerWin;
     this.adoptRealm(resolution);
     this.realmSwitches += 1;
+    this.editor?.cancel("realm-switched");
+    this.syncEditorContextRealm();
     // Identity is a property of the realm it was read from, so adopting another realm
     // makes the latched key foreign: the new realm's document is a different
     // document, and the overlays carry the old realm's window either way. The
@@ -1490,6 +1515,229 @@ export class ReaderSession {
 
     this.identityPromises.set(cacheId, task);
     return task;
+  }
+
+  /**
+   * Resolves `{ attachmentItemID, storageKey, fingerprint }` synchronously when
+   * both `reader.itemID` and a non-provisional `documentId` are already known.
+   */
+  resolveSyncIdentity(overlayDocId = this.documentId) {
+    const targetDocId = overlayDocId ?? this.documentId ?? null;
+    const itemID = this.reader?.itemID;
+    return normalizeAttachmentIdentity({ itemID, docId: targetDocId });
+  }
+
+  /**
+   * Starts warming the attachment's persistent record in memory so synchronous
+   * context-menu queries have saved overrides immediately available.
+   */
+  warmPersistentStore() {
+    const store = this.persistentStore;
+    if (this.destroyed || !store) return Promise.resolve(null);
+    const identity = this.resolveSyncIdentity();
+    if (!identity) return Promise.resolve(null);
+    return this.resolvePersistentIdentity(this.documentId)
+      .then((fullId) => {
+        if (this.destroyed || this.persistentStore !== store || !fullId) return null;
+        return store.loadDocument(fullId);
+      })
+      .catch(() => null);
+  }
+
+  /** Ensures passive right-click coordinate capture follows the live inner realm. */
+  syncEditorContextRealm() {
+    if (this.destroyed || !this.editor) return;
+    try {
+      this.editor.attachContextListener(this.innerWin?.document ?? null);
+    } catch (err) {
+      warnOnce("editor-context-bind", err, this.tag);
+    }
+  }
+
+  /**
+   * Synchronously reads effective regions, cached auto regions, and overrides
+   * for one page without disk IO or detection (for `createViewContextMenu`).
+   */
+  getPageEffectiveStateSync(pageNumber) {
+    const pageNum = Number(pageNumber);
+    const identity = this.resolveSyncIdentity();
+    const key = this.cacheKey();
+    const memCached = key ? this.regionCache?.get?.(key, pageNum) : null;
+    const diskState =
+      this.persistentStore && identity ? this.persistentStore.getPageStateSync(identity, pageNum) : null;
+
+    const overrides = diskState?.loaded ? diskState.overrides : [];
+    let autoRegions = null;
+    if (diskState?.loaded && diskState.hit) {
+      autoRegions = serializeAutoRegions(diskState.autoRegions);
+    } else if (memCached && memCached.autoRegions !== undefined) {
+      autoRegions = serializeAutoRegions(memCached.autoRegions);
+    }
+
+    let effective;
+    if (autoRegions !== null) {
+      effective = resolveEffectiveRegions(autoRegions, overrides);
+    } else if (memCached?.regions) {
+      const baseRegions = serializeAutoRegions(memCached.regions);
+      autoRegions = baseRegions;
+      effective = resolveEffectiveRegions(baseRegions, overrides);
+    } else {
+      const overlay = this.overlays.get(pageNum);
+      const fallbackAuto = overlay?.regionBoxes?.length
+        ? serializeAutoRegions(
+            overlay.regionBoxes.map((rect, idx) => ({
+              rect,
+              sourceKinds: [overlay.regionKinds?.[idx] ?? "figure"],
+            })),
+          )
+        : [];
+      autoRegions = fallbackAuto;
+      effective = resolveEffectiveRegions(fallbackAuto, overrides);
+    }
+
+    return {
+      identity,
+      loaded: Boolean(diskState?.loaded),
+      autoRegions,
+      overrides,
+      effective,
+    };
+  }
+
+  /**
+   * Maps a right-click event (captured from inner `contextmenu` or synthesized
+   * from Zotero's `createViewContextMenu` `params.{x, y}`) onto the rendered
+   * page view, effective region, or suppressed auto region.
+   */
+  resolveContextHit(params = {}) {
+    if (this.destroyed || !this.innerWin) return null;
+    this.syncEditorContextRealm();
+
+    const snap = this.editor?.consumeContextEvent?.() ?? null;
+    const views = listPageViews(resolvePDFViewer(this.innerWin, this.tag));
+    if (!views.length) return null;
+
+    let clientX = snap ? Number(snap.clientX) : Number.NaN;
+    let clientY = snap ? Number(snap.clientY) : Number.NaN;
+    const targetNode = snap?.target ?? null;
+
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+      const rawX = Number(params?.x);
+      const rawY = Number(params?.y);
+      if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) return null;
+      let offX = 0;
+      let offY = 0;
+      try {
+        const frameEl = this.reader?._internalReader?._primaryView?._iframe ?? this.innerWin?.frameElement ?? null;
+        const frameRect = frameEl?.getBoundingClientRect?.() ?? null;
+        if (frameRect) {
+          offX = Number(frameRect.left) || 0;
+          offY = Number(frameRect.top) || 0;
+        }
+      } catch {
+        // Unreadable frame rect defaults to zero offset.
+      }
+      clientX = rawX - offX;
+      clientY = rawY - offY;
+    }
+
+    let pageView = null;
+    let pageRect = null;
+    if (targetNode) {
+      for (const view of views) {
+        const div = view?.div;
+        if (!div) continue;
+        if (div === targetNode || div.contains?.(targetNode)) {
+          pageView = view;
+          pageRect = div.getBoundingClientRect?.() ?? null;
+          break;
+        }
+      }
+    }
+    if (!pageView) {
+      for (const view of views) {
+        const div = view?.div;
+        if (!div || typeof div.getBoundingClientRect !== "function") continue;
+        const rect = div.getBoundingClientRect();
+        if (!rect || !(rect.width > 0 && rect.height > 0)) continue;
+        if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+          pageView = view;
+          pageRect = rect;
+          break;
+        }
+      }
+    }
+
+    const pageNumber = Number(pageView?.id) || 0;
+    const viewport = pageView?.viewport ?? null;
+    if (!pageView || !pageNumber || !viewport || !pageRect) return null;
+
+    const vpPoint = clientPointToViewportPoint({
+      clientX,
+      clientY,
+      pageRect,
+      scrollLeft: Number(pageView.div?.scrollLeft) || 0,
+      scrollTop: Number(pageView.div?.scrollTop) || 0,
+      viewport,
+    });
+    if (!vpPoint) return null;
+    const [vx, vy] = vpPoint;
+    if (vx < -1e-3 || vy < -1e-3 || vx > viewport.width + 1e-3 || vy > viewport.height + 1e-3) {
+      return null;
+    }
+
+    let pdfPoint;
+    try {
+      pdfPoint = toPdfPoint(vpPoint, viewport);
+    } catch {
+      return null;
+    }
+
+    const pageState = this.getPageEffectiveStateSync(pageNumber);
+    const hit = hitTestRegions(pdfPoint, pageState.effective.regions);
+    const suppressedHit = hit
+      ? null
+      : findSuppressedTargetAtPoint(pdfPoint, {
+          overrides: pageState.overrides,
+          autoRegions: pageState.autoRegions,
+        });
+
+    return {
+      pageNumber,
+      pageView,
+      viewportPoint: vpPoint,
+      pdfPoint,
+      pageState,
+      hit,
+      suppressedHit,
+    };
+  }
+
+  /** Opens interactive 4-corner adjustment for `region` on `pageNumber`/`pageView`. */
+  startAdjustRegion({ pageNumber, pageView = null, region }) {
+    if (this.destroyed || !this.enabled || !this.editor) return false;
+    const targetView =
+      pageView ??
+      listPageViews(resolvePDFViewer(this.innerWin, this.tag)).find((v) => Number(v?.id) === Number(pageNumber)) ??
+      null;
+    if (!targetView) return false;
+    return this.editor.startAdjust({ pageView: targetView, pageNumber, region });
+  }
+
+  /** Opens interactive draw + corner adjustment for adding a new region on `pageNumber`. */
+  startAddRegion({ pageNumber, pageView = null }) {
+    if (this.destroyed || !this.enabled || !this.editor) return false;
+    const targetView =
+      pageView ??
+      listPageViews(resolvePDFViewer(this.innerWin, this.tag)).find((v) => Number(v?.id) === Number(pageNumber)) ??
+      null;
+    if (!targetView) return false;
+    return this.editor.startAdd({ pageView: targetView, pageNumber });
+  }
+
+  /** Cancels any active uncommitted edit without writing to persistent storage. */
+  cancelEditor(reason = "cancel") {
+    return Boolean(this.editor?.cancel(reason));
   }
 
   /** Ensures a shared visibilitychange handler is created and bound to the reader's outer document. */
@@ -1706,6 +1954,8 @@ export class ReaderSession {
       this.identityPromises.clear();
       this.regionCache.invalidateDocument(staleKey);
       this.detachAll();
+      this.syncEditorContextRealm();
+      void this.warmPersistentStore();
       void this.repaintAttached();
       // The same race as the first open and the same reason: with a warm
       // RegionCache this paint lands while the swapped-in document is still
@@ -1895,6 +2145,10 @@ export class ReaderSession {
     const pageNumber = Number(pageView?.id) || 0;
     if (!pageNumber) return null;
     if (!pageView?.pdfPage || !pageView?.div || !pageView?.viewport) return null;
+    this.syncEditorContextRealm();
+    if (this.editor?.active?.pageNumber === pageNumber && this.editor.active.pageView !== pageView) {
+      this.editor.cancel("pageview-replaced");
+    }
     let overlay = this.overlays.get(pageNumber);
     if (!overlay) {
       try {
@@ -2073,6 +2327,7 @@ export class ReaderSession {
     if (identity !== "ok") return;
     const key = this.cacheKey();
     const epoch = ++this.paintEpoch;
+    this.editor?.cancel("view-scale-change");
     const cur = Number(resolvePDFViewer(this.innerWin, this.tag)?.currentPageNumber) || 1;
     const ordered = [...this.overlays.values()]
       .filter((overlay) => overlay && !overlay.destroyed)
@@ -2144,8 +2399,11 @@ export class ReaderSession {
     const value = Boolean(next);
     this.enabled = value;
     if (this.destroyed) return value;
-    if (!value) this.detachAll();
-    else {
+    if (!value) {
+      this.editor?.cancel("disabled");
+      this.editor?.clearNotice();
+      this.detachAll();
+    } else {
       // The toggle repaints every page, so it goes through the same entry as the
       // other wakes: a session that still holds the previous document's identity must
       // not read its regions back from the cache and mount them again. A `rekeyed`
@@ -2173,6 +2431,8 @@ export class ReaderSession {
 
   /** Removes every canvas of this reader without clearing the RegionCache. */
   detachAll() {
+    this.editor?.cancel("detach");
+    this.editor?.clearNotice();
     for (const overlay of [...this.overlays.values()]) {
       try {
         overlay.clear();
@@ -2200,8 +2460,7 @@ export class ReaderSession {
       this.regionCache?.invalidateDocument?.(key);
     }
     const overlay = this.overlays.get(pageNum);
-    if (!overlay) return null;
-    overlay.clear();
+    overlay?.clear?.();
     if (!this.enabled) return null;
     if (!this.isForeground()) {
       this.workPausedInBackground = true;
@@ -2250,6 +2509,11 @@ export class ReaderSession {
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
+    try {
+      this.editor?.destroy();
+    } catch (err) {
+      warnOnce("destroy-editor", err);
+    }
     for (const overlay of [...this.overlays.values()]) {
       try {
         overlay.destroy();
