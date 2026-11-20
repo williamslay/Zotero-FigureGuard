@@ -86,7 +86,7 @@ export async function collectPageEvidence({
   const textContent = await pdfPage.getTextContent({ includeMarkedContent });
   const textItems = (textContent?.items ?? []).filter((item) => !item?.type);
   const lines = collectTextLines(textItems);
-  const captions = collectCaptions(lines);
+  const captions = collectCaptions(lines, { placements, pageRect });
 
   return {
     viewport,

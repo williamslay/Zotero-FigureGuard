@@ -30,6 +30,18 @@ const NUMERIC_TICK_ROW_RE = /^[\d.,+\-%eE/\s()]+$/;
  * @param {number[]} a
  * @param {number[]} b
  */
+function isLinePartOfAcceptedCaptions(line, captions) {
+  if (!line?.rect || !captions?.length) return false;
+  const lrArea = rectArea(line.rect);
+  if (!(lrArea > 0)) return false;
+  for (const cap of captions) {
+    if (!cap?.rect) continue;
+    const inter = intersectRects(line.rect, cap.rect);
+    if (inter && rectArea(inter) / lrArea >= 0.45) return true;
+  }
+  return false;
+}
+
 function rectsOverlap(a, b) {
   return !(b[0] > a[2] || b[2] < a[0] || b[1] > a[3] || b[3] < a[1]);
 }
@@ -270,7 +282,9 @@ export function analyzePageText(textItems, captions, pageRect, options = {}) {
   }
 
   for (const line of hLines) {
-    if (CAPTION_RE.test(line.text)) continue;
+    if (captions?.length ? isLinePartOfAcceptedCaptions(line, captions) : CAPTION_RE.test(line.text)) {
+      continue;
+    }
     if (TABLE_OR_ALGO_CAPTION_RE.test(line.text)) {
       tableCaptionRects.push(line.rect);
     }
@@ -364,6 +378,7 @@ export function extractTableTerritories(tableCaptionRects, hLines, captions, pro
           l.rect[3] < tc[1] - 2 &&
           l.rect[1] >= minY &&
           !CAPTION_RE.test(l.text) &&
+          !isLinePartOfAcceptedCaptions(l, captions) &&
           !TABLE_OR_ALGO_CAPTION_RE.test(l.text),
       )
       .sort((a, b) => b.rect[3] - a.rect[3]);
@@ -429,6 +444,7 @@ export function extractTableTerritories(tableCaptionRects, hLines, captions, pro
           l.rect[1] > tc[3] + 2 &&
           l.rect[3] <= maxY &&
           !CAPTION_RE.test(l.text) &&
+          !isLinePartOfAcceptedCaptions(l, captions) &&
           !TABLE_OR_ALGO_CAPTION_RE.test(l.text),
       )
       .sort((a, b) => a.rect[1] - b.rect[1]);

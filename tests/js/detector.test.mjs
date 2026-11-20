@@ -1358,4 +1358,173 @@ describe("detector: Zotero-aligned edge, table-guard, substrate, and mixed-image
     assert.equal(covered.regions[0].kind, "form");
     assert.equal(covered.rejected.filter((r) => r.reason === "extreme-aspect").length, 1);
   });
+
+  it("recovers orphan captions for unlinked form, image, or path even when merged starts empty", () => {
+    const cap = { number: "1", label: "Figure 1:", text: "Figure 1: Throughput.", rect: [54, 594, 250, 604] };
+    // Non-blocker X-axis label spans [614..622] — its bottom sits 36 pt below
+    // the graphic (`[54, 650, 260, 720]`), past `textBelowPreCaptionPt` (26 pt) so
+    // `preExpand` cannot reach it before initial `linkCaption` fails (`gap = 46 pt`).
+    // Proposal recovery bridges across the axis label and `expandRegionsWithLabels4Way`
+    // (`textBelowExpansionPt: 36`) then absorbs the axis label cleanly.
+    const axisLabel = {
+      str: "Time (ms)",
+      transform: [8, 0, 0, 8, 130, 614],
+      width: 42,
+      height: 8,
+    };
+
+    const formRecovered = detectFigureRegions({
+      placements: [form([54, 650, 260, 720])],
+      captions: [cap],
+      textItems: [axisLabel],
+      pageRect: PAGE,
+    });
+    assert.equal(formRecovered.regions.length, 1);
+    assert.equal(formRecovered.regions[0].captionNumber, "1");
+    assert.ok(formRecovered.regions[0].evidence.includes("unlinked-orphan-recovery"));
+
+    const imageRecovered = detectFigureRegions({
+      placements: [image([54, 650, 260, 720])],
+      captions: [cap],
+      textItems: [axisLabel],
+      pageRect: PAGE,
+    });
+    assert.equal(imageRecovered.regions.length, 1);
+    assert.equal(imageRecovered.regions[0].captionNumber, "1");
+    assert.ok(imageRecovered.regions[0].evidence.includes("unlinked-orphan-recovery"));
+
+    const pathRecovered = detectFigureRegions({
+      placements: [path([54, 655, 160, 710])],
+      captions: [cap],
+      pageRect: PAGE,
+    });
+    assert.equal(pathRecovered.regions.length, 1);
+    assert.equal(pathRecovered.regions[0].captionNumber, "1");
+    assert.ok(pathRecovered.regions[0].evidence.includes("unlinked-orphan-recovery"));
+
+    // A body prose blocker in the corridor blocks recovery so prose is never whitened.
+    const blockedByProse = detectFigureRegions({
+      placements: [form([54, 650, 260, 720])],
+      captions: [cap],
+      textItems: [
+        axisLabel,
+        {
+          str: "This body prose sentence lies between the figure and its caption below.",
+          transform: [10, 0, 0, 10, 54, 628],
+          width: 240,
+          height: 10,
+        },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(blockedByProse.regions.length, 0);
+  });
+
+  it("places wrapped 'Figure N.' prose continuations rejected by collectCaptions into proseBlockers", () => {
+    const tl = analyzePageText(
+      [
+        {
+          str: "percentage of the total time, for the reasons explained in",
+          transform: [10, 0, 0, 10, 54, 210],
+          width: 230,
+          height: 10,
+        },
+        {
+          str: "Figure 6. For larger pairs, log writing dominates the execution time.",
+          transform: [10, 0, 0, 10, 54, 198],
+          width: 235,
+          height: 10,
+        },
+      ],
+      [{ number: "9", label: "Figure 9:", text: "Figure 9: Other.", rect: [318, 600, 540, 610] }],
+      PAGE,
+      DEFAULT_DETECTOR_OPTIONS,
+    );
+    assert.equal(tl.proseBlockers.length, 2);
+  });
+
+  it("groups multi-panel sub-components into one orphan proposal without merging separate figures (B2/B5)", () => {
+    // Two 42x42 pt (~0.0036 < minAreaRatio 0.004) sub-images placed cleanly inside
+    // one orphan caption's corridor: individually rejected by `below-min-area`,
+    // merged together as a multi-panel proposal (`>= 0.004` area ratio).
+    const cap = { number: "4", label: "Figure 4:", text: "Figure 4: Panels.", rect: [54, 608, 220, 618] };
+    const panelA = image([54, 632, 96, 674]);
+    const panelB = image([110, 632, 152, 674]);
+    const multiPanel = detectFigureRegions({
+      placements: [panelA, panelB],
+      captions: [cap],
+      pageRect: PAGE,
+    });
+    assert.equal(multiPanel.regions.length, 1);
+    assert.equal(multiPanel.regions[0].captionNumber, "4");
+    assert.deepEqual(multiPanel.regions[0].rect, [54, 632, 152, 674]);
+    assert.ok(multiPanel.regions[0].evidence.includes("multi-panel-proposal"));
+
+    // Two vertically stacked separate figures with their own captions stay strictly separate.
+    const capTop = { number: "1", label: "Figure 1:", text: "Figure 1: Upper.", rect: [54, 580, 260, 590] };
+    const capBot = { number: "2", label: "Figure 2:", text: "Figure 2: Lower.", rect: [54, 410, 260, 420] };
+    const twoStacked = detectFigureRegions({
+      placements: [form([54, 615, 260, 700]), form([54, 445, 260, 530])],
+      captions: [capTop, capBot],
+      textItems: [
+        { str: "Axis A", transform: [8, 0, 0, 8, 130, 598], width: 30, height: 8 },
+        { str: "Axis B", transform: [8, 0, 0, 8, 130, 428], width: 30, height: 8 },
+      ],
+      pageRect: PAGE,
+    });
+    assert.equal(twoStacked.regions.length, 2);
+    assert.deepEqual(
+      twoStacked.regions.map((r) => r.captionNumber),
+      ["1", "2"],
+    );
+    assert.ok(twoStacked.regions[0].rect[1] > capTop.rect[3]);
+    assert.ok(twoStacked.regions[1].rect[3] < capTop.rect[1]);
+  });
+
+  it("reports Stage C diagnostics categories cleanly across outcomes", () => {
+    const empty = detectFigureRegions({ placements: [form([54, 600, 250, 700])], captions: [], pageRect: PAGE });
+    assert.equal(empty.diagnostics.failureReasonCounts["no-caption-detected"], 1);
+    assert.equal(empty.diagnostics.acceptedRegionCount, 0);
+
+    const noGfx = detectFigureRegions({
+      placements: [],
+      captions: [{ number: "1", label: "Figure 1:", text: "Figure 1: Missing gfx.", rect: [54, 600, 250, 610] }],
+      pageRect: PAGE,
+    });
+    assert.equal(noGfx.diagnostics.orphanCaptionCount, 1);
+    assert.equal(noGfx.diagnostics.failureReasonCounts["caption-without-graphics"], 1);
+
+    const linkFailed = detectFigureRegions({
+      placements: [form([400, 600, 540, 700])],
+      captions: [{ number: "2", label: "Figure 2:", text: "Figure 2: Far left.", rect: [54, 600, 220, 610] }],
+      pageRect: PAGE,
+    });
+    assert.equal(linkFailed.diagnostics.orphanCaptionCount, 1);
+    assert.equal(linkFailed.diagnostics.failureReasonCounts["caption-link-failed"], 1);
+
+    const candRejected = detectFigureRegions({
+      placements: [form([0, 400, 612, 426])],
+      captions: [{ number: "3", label: "Figure 3:", text: "Figure 3: Thin.", rect: [54, 380, 220, 390] }],
+      pageRect: PAGE,
+    });
+    assert.equal(candRejected.diagnostics.orphanCaptionCount, 1);
+    assert.equal(candRejected.diagnostics.failureReasonCounts["candidate-rejected"], 1);
+
+    const sharedBox = [90, 655, 290, 720];
+    const conflicted = detectFigureRegions({
+      placements: [form(sharedBox)],
+      captions: [
+        { number: "4", label: "Figure 4:", text: "Figure 4: Left.", rect: [54, 604, 195, 614] },
+        { number: "5", label: "Figure 5:", text: "Figure 5: Right.", rect: [205, 604, 300, 614] },
+      ],
+      textItems: [{ str: "Ticks", transform: [8, 0, 0, 8, 175, 620], width: 25, height: 8 }],
+      pageRect: PAGE,
+    });
+    assert.equal(conflicted.diagnostics.acceptedRegionCount, 1);
+    assert.equal(conflicted.diagnostics.orphanCaptionCount, 1);
+    assert.equal(conflicted.diagnostics.failureReasonCounts["region-accepted"], 1);
+    assert.equal(conflicted.diagnostics.failureReasonCounts["proposal-conflict"], 1);
+    assert.ok(conflicted.diagnostics.proposalConflictCount >= 1);
+    assert.ok(conflicted.diagnostics.proposalRecoveredCount >= 1);
+  });
 });

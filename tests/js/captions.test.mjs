@@ -138,14 +138,95 @@ describe("captions: figure labels", () => {
     ["Fig. 3) caption text", "3"],
     ["FIGURE 10: caption text", "10"],
     ["Fig 7a: subfigure", "7a"],
+    ["Figure 4 — System Overview", "4"],
+    ["Fig. 5 – Results", "5"],
+    ["Fig. 5 - Results", "5"],
+    ["Fig . 8 : Throughput", "8"],
   ];
   for (const [text, number] of cases) {
     it(`accepts ${JSON.stringify(text)}`, () => {
-      const captions = collectCaptions([{ text, rect: [54, 599, 200, 610], fontSize: 10 }]);
+      const captions = collectCaptions([{ text, rect: [54, 599, 240, 610], fontSize: 10 }]);
       assert.equal(captions.length, 1);
       assert.equal(captions[0].number, number);
     });
   }
+
+  it("reconstructs PDF.js split punctuation runs like Fig + . + 8 + :", () => {
+    const runs = [
+      item("Fig", 54, 600, 10, 14),
+      item(".", 68.5, 600, 10, 2.5),
+      item("8", 74, 600, 10, 5),
+      item(":", 79.5, 600, 10, 2.5),
+      item("Throughput", 86, 600, 10, 55),
+    ];
+    const lines = collectTextLines(runs);
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0].text, "Fig. 8: Throughput");
+    const captions = collectCaptions(lines);
+    assert.equal(captions.length, 1);
+    assert.equal(captions[0].number, "8");
+    assert.equal(captions[0].label, "Fig. 8:");
+  });
+
+  it("accepts controlled delimiter-less and two-line captions when isolated or distinct", () => {
+    const inlineCaption = collectCaptions([
+      { text: "Figure 6 Performance comparison", rect: [54, 560, 230, 570], fontSize: 10, fontName: "bold" },
+      { text: "We compare throughput across all three storage systems in detail.", rect: [54, 500, 294, 510], fontSize: 10, fontName: "regular" },
+      { text: "Each workload runs for five minutes after warmup completes.", rect: [54, 488, 294, 498], fontSize: 10, fontName: "regular" },
+      { text: "Memory bandwidth remains bounded throughout every experiment.", rect: [54, 476, 294, 486], fontSize: 10, fontName: "regular" },
+    ]);
+    assert.equal(inlineCaption.length, 1);
+    assert.equal(inlineCaption[0].number, "6");
+
+    const twoLine = collectCaptions([
+      { text: "Figure 7", rect: [275, 560, 325, 570], fontSize: 10 },
+      { text: "System architecture overview across CXL memory and flash tiers.", rect: [54, 545, 558, 555], fontSize: 10 },
+    ]);
+    assert.equal(twoLine.length, 1);
+    assert.equal(twoLine[0].number, "7");
+    assert.equal(twoLine[0].label, "Figure 7");
+    assert.deepEqual(twoLine[0].rect, [54, 545, 558, 570]);
+    assert.ok(twoLine[0].text.includes("System architecture overview"));
+  });
+
+  it("excludes prose cross-references even at line starts", () => {
+    const proseLines = [
+      { text: "Figure 6 shows that throughput increases across all workloads.", rect: [54, 500, 294, 510], fontSize: 10 },
+      { text: "Figure 2, Flatstore reduces write amplification dramatically.", rect: [54, 480, 294, 490], fontSize: 10 },
+      { text: "Figure 6-(b) shows that MEMREAD saturates flash channels.", rect: [54, 460, 294, 470], fontSize: 10 },
+      { text: "Figure 5(a), the amplitude varies with queue depth.", rect: [54, 440, 294, 450], fontSize: 10 },
+      { text: "Figure 6-11 summarize our sensitivity evaluation across traces.", rect: [54, 420, 294, 430], fontSize: 10 },
+    ];
+    assert.equal(collectCaptions(proseLines).length, 0);
+
+    // Indented justified body paragraph opening ("Figure 6. ...")
+    const indentedParagraph = [
+      { text: "Figure 6. For larger value sizes, background compaction helps.", rect: [64, 500, 294, 510], fontSize: 10, fontName: "f0" },
+      { text: "This behaviour continues across all four SSD devices in our cluster.", rect: [54, 488, 294, 498], fontSize: 10, fontName: "f0" },
+    ];
+    assert.equal(collectCaptions(indentedParagraph).length, 0);
+
+    // Embedded multi-line body paragraph starting "Figure 6 <ProperNoun>..."
+    const denseParagraph = [
+      { text: "Earlier storage engines suffer from high compaction stalls on flash.", rect: [54, 524, 294, 534], fontSize: 10, fontName: "f0" },
+      { text: "Our evaluation confirms consistent latency tail behavior.", rect: [54, 512, 294, 522], fontSize: 10, fontName: "f0" },
+      { text: "Figure 6 ByteFS improves throughput by 3x across all workloads.", rect: [54, 500, 294, 510], fontSize: 10, fontName: "f0" },
+      { text: "Moreover, the background write log keeps queues bounded.", rect: [54, 488, 294, 498], fontSize: 10, fontName: "f0" },
+    ];
+    assert.equal(collectCaptions(denseParagraph).length, 0);
+
+    // Delimiter-less line on a page with graphic context disabled/absent stays rejected without distinct font
+    const noGraphicPage = collectCaptions(
+      [
+        { text: "Summary of experiments conducted across all workloads.", rect: [54, 540, 294, 550], fontSize: 10, fontName: "f0" },
+        { text: "Figure 6 ByteFS throughput scales cleanly with thread count.", rect: [54, 500, 294, 510], fontSize: 10, fontName: "f0" },
+        { text: "Each run measures steady-state performance under YCSB-A.", rect: [54, 488, 294, 498], fontSize: 10, fontName: "f0" },
+        { text: "Cache hit rates stay above ninety percent during the benchmark.", rect: [54, 476, 294, 486], fontSize: 10, fontName: "f0" },
+      ],
+      { placements: [], pageRect: [0, 0, 612, 792] },
+    );
+    assert.equal(noGraphicPage.length, 0);
+  });
 
   it("rejects body text that only mentions a figure", () => {
     assert.equal(CAPTION_RE.test("see Figure 2 for details"), false);
@@ -174,5 +255,16 @@ describe("captions: figure labels", () => {
       },
     ];
     assert.equal(collectCaptions(lines).length, 0);
+  });
+
+  it("handles same-baseline dash captions next to prose without leaking prose as caption", () => {
+    const row = [
+      item("As discussed earlier, Figure 3 shows low tail latency under", 54, 440, 9.963, 240),
+      item("Figure 4 — System Overview", 336, 440, 9.963, 180),
+    ];
+    const lines = collectTextLines(row);
+    const captions = collectCaptions(lines);
+    assert.deepEqual(captions.map((c) => c.number), ["4"]);
+    assert.equal(captions[0].label, "Figure 4 —");
   });
 });

@@ -82,6 +82,11 @@ export function detectFigureRegions(input) {
         placementCount: 0,
         rawPlacementCount: rawPlacements.length,
         captionCount: 0,
+        acceptedRegionCount: 0,
+        orphanCaptionCount: 0,
+        proposalCount: 0,
+        proposalRecoveredCount: 0,
+        proposalConflictCount: 0,
         structRegionCount: 0,
         rawPathBoxCount,
         pathBoxCount: 0,
@@ -91,6 +96,15 @@ export function detectFigureRegions(input) {
         pathClusterSplits: 0,
         textExpandedRegions: 0,
         skippedNoCaption: true,
+        captionOutcomes: [],
+        failureReasonCounts: {
+          "no-caption-detected": 1,
+          "caption-without-graphics": 0,
+          "caption-link-failed": 0,
+          "candidate-rejected": 0,
+          "proposal-conflict": 0,
+          "region-accepted": 0,
+        },
         evaluated: [],
       },
     };
@@ -300,10 +314,17 @@ export function detectFigureRegions(input) {
     options,
   );
   let textExpansion = expandRegionsWithLabels4Way(merged, textLayout, pageRect, options);
-  const { linkedCount: proposalLinks, recoveredIndexes } = reconcileWithCaptionProposals(
+  const {
+    linkedCount: proposalLinks,
+    recoveredIndexes,
+    proposalCount,
+    proposalConflictCount,
+    conflictedCaptions,
+  } = reconcileWithCaptionProposals(
     merged,
     regions,
     unabsorbed,
+    rejected,
     absorbedRejectedRegions,
     evaluated,
     captions,
@@ -342,6 +363,18 @@ export function detectFigureRegions(input) {
     region.pageAreaRatio = round(areaRatioOf(region.rect, pageRect), 4);
   }
 
+  const stageCDiag = summarizeStageCDiagnostics({
+    captions,
+    merged,
+    evaluated,
+    rejected,
+    conflictedCaptions,
+    proposalCount,
+    proposalLinks,
+    proposalConflictCount,
+    options,
+  });
+
   return {
     regions: merged,
     rejected,
@@ -349,6 +382,11 @@ export function detectFigureRegions(input) {
       placementCount: placements.length,
       rawPlacementCount: rawPlacements.length,
       captionCount: captions.length,
+      acceptedRegionCount: merged.length,
+      orphanCaptionCount: stageCDiag.orphanCaptionCount,
+      proposalCount,
+      proposalRecoveredCount: proposalLinks,
+      proposalConflictCount,
       structRegionCount: structRegions.length,
       rawPathBoxCount: pathMerge.diagnostics.rawPathBoxCount,
       pathBoxCount: pathMerge.diagnostics.pathBoxCount,
@@ -358,6 +396,8 @@ export function detectFigureRegions(input) {
       pathClusterSplits: pathMerge.diagnostics.pathClusterSplits,
       textExpandedRegions: textExpansion,
       skippedNoCaption: false,
+      captionOutcomes: stageCDiag.captionOutcomes,
+      failureReasonCounts: stageCDiag.failureReasonCounts,
       evaluated,
     },
   };
@@ -1635,7 +1675,11 @@ function proposalSightClear(rect, capRect, side, prose, otherCaps, tableRects) {
       : [Math.min(rect[0], capRect[0]), capRect[3], Math.max(rect[2], capRect[2]), Math.max(capRect[3], rect[1])];
   if (sight[3] <= sight[1]) return true;
   if (blockersIntersectRect(sight, prose)) return false;
-  if (blockersIntersectRect(sight, otherCaps)) return false;
+  const capSight =
+    side === "below"
+      ? [sight[0], sight[1], sight[2], Math.max(sight[1], sight[3] - 2)]
+      : [sight[0], Math.min(sight[3], sight[1] + 2), sight[2], sight[3]];
+  if (capSight[3] > capSight[1] && blockersIntersectRect(capSight, otherCaps)) return false;
   return !tableRects.some((tr) => !(tr[0] > sight[2] || tr[2] < sight[0] || tr[1] > sight[3] || tr[3] < sight[1]));
 }
 
@@ -1800,18 +1844,537 @@ function recoverExtremeAspectForOrphans({
   return { linkedCount, recoveredIndexes };
 }
 
+function buildProposalCorridors(orphanCaptions, merged, textLayout, pageRect, options) {
+  const pageWidth = rectWidth(pageRect);
+  const midX = (pageRect[0] + pageRect[2]) / 2;
+  const proposals = [];
+  for (let ci = 0; ci < orphanCaptions.length; ci++) {
+    const cap = orphanCaptions[ci];
+    const cr = cap.rect;
+    const center = (cr[0] + cr[2]) / 2;
+    const isWide =
+      rectWidth(cr) >= pageWidth * 0.45 ||
+      (cr[0] < midX - 24 && cr[2] > midX + 24) ||
+      Math.abs(center - midX) <= 36;
+    const propLeft = isWide || center < midX ? pageRect[0] + 18 : midX + 2;
+    const propRight = isWide || center >= midX ? pageRect[2] - 18 : midX - 2;
+    const corridor = buildProposalCorridor(cap, propLeft, propRight, merged, textLayout, pageRect, options);
+    if (!corridor) continue;
+    proposals.push({
+      ci,
+      cap,
+      propLeft,
+      propRight,
+      corridor,
+      ceilingY: corridor[3],
+    });
+  }
+  return proposals;
+}
+
+function labelBridgedGap(rect, capRect, labelCandidates, side, maxStepPt = 28) {
+  const rawGap = side === "below" ? capRect[1] - rect[3] : rect[1] - capRect[3];
+  if (!labelCandidates?.length) return { gap: rawGap, hasLabelsInGap: false };
+  const x0 = Math.min(rect[0], capRect[0]) - 12;
+  const x1 = Math.max(rect[2], capRect[2]) + 12;
+  if (side === "above") {
+    const inBand = labelCandidates
+      .map((c) => c?.rect)
+      .filter((r) => r && r[2] >= x0 && r[0] <= x1 && r[1] >= capRect[3] - 2 && r[3] <= rect[1] + 2)
+      .sort((a, b) => b[3] - a[3]);
+    if (!inBand.length) return { gap: rawGap, hasLabelsInGap: false };
+    let frontier = rect[1];
+    for (const lr of inBand) {
+      if (frontier - lr[3] <= maxStepPt) frontier = Math.min(frontier, lr[1]);
+    }
+    return { gap: Math.max(0, frontier - capRect[3]), hasLabelsInGap: true };
+  }
+  const inBand = labelCandidates
+    .map((c) => c?.rect)
+    .filter((r) => r && r[2] >= x0 && r[0] <= x1 && r[1] >= rect[3] - 2 && r[3] <= capRect[1] + 2)
+    .sort((a, b) => a[1] - b[1]);
+  if (!inBand.length) return { gap: rawGap, hasLabelsInGap: false };
+  let frontier = rect[3];
+  for (const lr of inBand) {
+    if (lr[1] - frontier <= maxStepPt) frontier = Math.max(frontier, lr[3]);
+  }
+  return { gap: Math.max(0, capRect[1] - frontier), hasLabelsInGap: true };
+}
+
+function captionGapAllowance(capRect, rect, pageWidth, options) {
+  return (
+    options.maxCaptionGapPt +
+    (pageWidth > 0
+      ? (options.captionGapWidthAllowanceFactor * Math.max(rectWidth(capRect), rectWidth(rect))) /
+        pageWidth
+      : 0)
+  );
+}
+
+/**
+ * Recover unlinked normal-aspect graphic placements (`form`, `image`, or
+ * sub-threshold `path` clusters) that sit in a remaining orphan caption's
+ * clear-sight corridor — including pages where initial linking failed and
+ * `merged` started completely empty.
+ */
+function isCaptionCoveredByRegions(cap, regions, options) {
+  for (const region of regions ?? []) {
+    if (region.captionNumber != null && String(region.captionNumber) === String(cap.number)) {
+      return true;
+    }
+    if (region.captionRects?.some((cr) => Math.abs(cr[0] - cap.rect[0]) < 1 && Math.abs(cr[1] - cap.rect[1]) < 1)) {
+      return true;
+    }
+    if (!region.caption) continue;
+    const ovX = Math.min(region.rect[2], cap.rect[2]) - Math.max(region.rect[0], cap.rect[0]);
+    const minW = Math.min(rectWidth(region.rect), rectWidth(cap.rect));
+    const gap = region.rect[1] - cap.rect[3];
+    if (ovX >= options.minCaptionOverlapRatio * minW && gap >= -options.maxCaptionOverlapPt && gap <= 36) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function canJoinProposalPeers(aRect, bRect, allBlockers, prose, otherCaps, textLayout, captions, options) {
+  const combined = unionRect(aRect, bRect);
+  if (blockersIntersectRect(combined, prose) || blockersIntersectRect(combined, otherCaps)) return false;
+  if (territoryOwnerIndex(combined, textLayout) >= 0 || isInsideTableCaptionRegion(combined, textLayout, captions)) {
+    return false;
+  }
+  if (allBlockers?.length && !hasDirectSightValid(aRect, bRect, allBlockers)) return false;
+
+  if (
+    iou(aRect, bRect) >= 0.5 ||
+    coverageOf(aRect, bRect) >= 0.85 ||
+    coverageOf(bRect, aRect) >= 0.85
+  ) {
+    return true;
+  }
+  const ovY = Math.min(aRect[3], bRect[3]) - Math.max(aRect[1], bRect[1]);
+  const minH = Math.min(rectHeight(aRect), rectHeight(bRect));
+  const gapX = Math.max(bRect[0] - aRect[2], aRect[0] - bRect[2], 0);
+  if (ovY >= 0.4 * minH && gapX <= (options.panelPeerGapPt ?? 60)) return true;
+
+  const ovX = Math.min(aRect[2], bRect[2]) - Math.max(aRect[0], bRect[0]);
+  const minW = Math.min(rectWidth(aRect), rectWidth(bRect));
+  const gapY = Math.max(bRect[1] - aRect[3], aRect[1] - bRect[3], 0);
+  return ovX >= 0.45 * minW && gapY <= 28;
+}
+
+/**
+ * Group corridor-contained graphic components into both single-component and
+ * clear-sight multi-panel proposal clusters for one orphan caption.
+ */
+function buildCorridorProposalClusters(corridorItemIndices, eligible, allBlockers, prose, otherCaps, textLayout, captions, pageRect, options) {
+  const groups = [];
+  const seenKeys = new Set();
+
+  const tryAddGroup = (indices) => {
+    const sorted = [...new Set(indices)].sort((a, b) => a - b);
+    if (!sorted.length) return;
+    if (sorted.length === 1 && eligible[sorted[0]].subMinArea) return;
+    const key = sorted.join(",");
+    if (seenKeys.has(key)) return;
+    seenKeys.add(key);
+
+    let rect = [...eligible[sorted[0]].rect];
+    for (let i = 1; i < sorted.length; i++) rect = unionRect(rect, eligible[sorted[i]].rect);
+    const ratio = areaRatioOf(rect, pageRect);
+    const w = rectWidth(rect);
+    const h = rectHeight(rect);
+    if (ratio < options.minAreaRatio || ratio > options.maxAreaRatio) return;
+    if (Math.min(w, h) < options.minSidePt) return;
+    const aspect = w / Math.max(1, h);
+    if (aspect < options.minAspect || aspect > options.maxAspect) return;
+    if (blockersIntersectRect(rect, prose) || blockersIntersectRect(rect, otherCaps)) return;
+    if (territoryOwnerIndex(rect, textLayout) >= 0 || isInsideTableCaptionRegion(rect, textLayout, captions)) return;
+
+    let hasVerticalStack = false;
+    for (let i = 0; i < sorted.length && !hasVerticalStack; i++) {
+      for (let j = i + 1; j < sorted.length; j++) {
+        const a = eligible[sorted[i]].rect;
+        const b = eligible[sorted[j]].rect;
+        if (Math.max(b[1] - a[3], a[1] - b[3]) > 2) {
+          hasVerticalStack = true;
+          break;
+        }
+      }
+    }
+    groups.push({
+      indices: sorted,
+      rect,
+      hasVerticalStack,
+      hasSubMinArea: sorted.some((idx) => eligible[idx].subMinArea),
+    });
+  };
+
+  for (const idx of corridorItemIndices) tryAddGroup([idx]);
+
+  if (corridorItemIndices.length >= 2) {
+    const n = corridorItemIndices.length;
+    const parent = Array.from({ length: n }, (_, i) => i);
+    const find = (x) => {
+      while (parent[x] !== x) {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+      }
+      return x;
+    };
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = eligible[corridorItemIndices[i]].rect;
+        const b = eligible[corridorItemIndices[j]].rect;
+        if (canJoinProposalPeers(a, b, allBlockers, prose, otherCaps, textLayout, captions, options)) {
+          const r1 = find(i);
+          const r2 = find(j);
+          if (r1 !== r2) parent[r2] = r1;
+        }
+      }
+    }
+    const buckets = new Map();
+    for (let i = 0; i < n; i++) {
+      const root = find(i);
+      if (!buckets.has(root)) buckets.set(root, []);
+      buckets.get(root).push(corridorItemIndices[i]);
+    }
+    for (const members of buckets.values()) {
+      if (members.length >= 2) tryAddGroup(members);
+    }
+  }
+
+  return groups;
+}
+
+/**
+ * Recover unlinked normal-aspect graphic placements (`form`, `image`, or
+ * sub-threshold `path` clusters) and cohesive multi-panel clusters that sit in a
+ * remaining orphan caption's clear-sight corridor — including pages where initial
+ * linking failed and `merged` started completely empty.
+ */
+function recoverUnlinkedGraphicsForOrphans({
+  orphanCaptions,
+  merged,
+  allRegions,
+  unabsorbed,
+  rejected,
+  absorbedRejectedRegions,
+  evaluated,
+  captions,
+  textLayout,
+  pageRect,
+  options,
+}) {
+  const recoveredIndexes = new Set();
+  const conflictedCaptions = new Set();
+  if (!orphanCaptions.length) {
+    return { linkedCount: 0, recoveredIndexes, proposalCount: 0, conflictCount: 0, conflictedCaptions };
+  }
+
+  const allBlockers = textLayout?.blockers ?? [];
+  const prose = textLayout?.proseBlockers ?? [];
+  const capBlockers = textLayout?.captionBlockers ?? [];
+  const labelCandidates = textLayout?.labelCandidates ?? [];
+  const tableRects = [
+    ...(textLayout?.tableCaptionRects ?? []),
+    ...((textLayout?.tableTerritories ?? []).map((t) => t.rect)),
+  ];
+  const pageWidth = rectWidth(pageRect);
+  const proposals = buildProposalCorridors(orphanCaptions, merged, textLayout, pageRect, options);
+  if (!proposals.length) {
+    return { linkedCount: 0, recoveredIndexes, proposalCount: 0, conflictCount: 0, conflictedCaptions };
+  }
+
+  const pool = [];
+  for (const reg of allRegions ?? []) {
+    if (reg.accepted || absorbedRejectedRegions.has(reg) || reg.caption) continue;
+    if (reg.rejectReason !== "below-confidence-threshold") continue;
+    const firstIdx = reg.placementIndexes?.[0];
+    const cand = firstIdx != null ? evaluated?.[firstIdx] : null;
+    if (cand?.fullBleedFrame || cand?.onlyThinRules) continue;
+    pool.push({
+      rect: reg.rect,
+      kinds: reg.sourceKinds ?? [reg.kind],
+      kind: reg.kind,
+      placementIndexes: [...(reg.placementIndexes ?? [])],
+      placementCount: reg.placementCount ?? 1,
+      poolType: "region",
+      subMinArea: false,
+      ref: reg,
+    });
+  }
+  for (let ui = 0; ui < (unabsorbed?.length ?? 0); ui++) {
+    const entry = unabsorbed[ui];
+    const cand = entry?.candidate;
+    if (!cand || cand.fullBleedFrame || cand.onlyThinRules) continue;
+    if (areaRatioOf(cand.rect, pageRect) < options.minAreaRatio) continue;
+    pool.push({
+      rect: cand.rect,
+      kinds: cand.sourceKinds ?? [cand.kind],
+      kind: cand.kind,
+      placementIndexes: [cand.index],
+      placementCount: 1,
+      poolType: "unabsorbed",
+      subMinArea: false,
+      ref: entry,
+    });
+  }
+  for (const rej of rejected ?? []) {
+    const cand = rej.index != null ? evaluated?.[rej.index] : null;
+    if (!cand || cand.fullBleedFrame || cand.onlyThinRules) continue;
+    if (rej.reason === "no-figure-evidence" && cand.passesBasicFilter) {
+      pool.push({
+        rect: cand.rect,
+        kinds: cand.sourceKinds ?? [cand.kind],
+        kind: cand.kind,
+        placementIndexes: [cand.index],
+        placementCount: 1,
+        poolType: "rejected",
+        subMinArea: false,
+        ref: rej,
+      });
+    } else if (rej.reason === "below-min-area" && cand.minSide >= 16 && rectArea(cand.rect) >= 256) {
+      pool.push({
+        rect: cand.rect,
+        kinds: cand.sourceKinds ?? [cand.kind],
+        kind: cand.kind,
+        placementIndexes: [cand.index],
+        placementCount: 1,
+        poolType: "rejected",
+        subMinArea: true,
+        ref: rej,
+      });
+    }
+  }
+
+  const eligible = pool.filter(
+    (item) =>
+      rectArea(item.rect) > 0 &&
+      territoryOwnerIndex(item.rect, textLayout) < 0 &&
+      !isInsideTableCaptionRegion(item.rect, textLayout, captions) &&
+      !blockersIntersectRect(item.rect, prose) &&
+      !overlapsExistingRegion(item.rect, merged),
+  );
+  if (!eligible.length) {
+    return { linkedCount: 0, recoveredIndexes, proposalCount: 0, conflictCount: 0, conflictedCaptions };
+  }
+
+  const matches = [];
+  for (const prop of proposals) {
+    const { ci, cap, propLeft, propRight, corridor } = prop;
+    const maxOverlap = Math.min(rectHeight(cap.rect), options.maxCaptionOverlapPt);
+    const otherCaps = capBlockers.filter(
+      (cb) =>
+        !(cb[2] >= cap.rect[0] - 4 && cb[0] <= cap.rect[2] + 4 && cb[3] >= cap.rect[1] - 4 && cb[1] <= cap.rect[3] + 4),
+    );
+    const propColW = propRight - propLeft;
+    const isWideCol = propColW >= pageWidth * 0.6;
+
+    const corridorAboveItems = [];
+    const corridorBelowItems = [];
+    for (let ei = 0; ei < eligible.length; ei++) {
+      const item = eligible[ei];
+      if (blockersIntersectRect(item.rect, otherCaps)) continue;
+      if (coverageOf(item.rect, corridor) >= 0.85) corridorAboveItems.push(ei);
+      else if (item.rect[0] >= propLeft - 4 && item.rect[2] <= propRight + 4 && item.rect[3] <= cap.rect[1] + maxOverlap) {
+        corridorBelowItems.push(ei);
+      }
+    }
+
+    const evaluateGroups = (sideLabel, groups) => {
+      for (const grp of groups) {
+        const { indices, rect, hasVerticalStack, hasSubMinArea } = grp;
+        const ovX = Math.min(rect[2], cap.rect[2]) - Math.max(rect[0], cap.rect[0]);
+        const horizGap = ovX >= 0 ? 0 : -ovX;
+        const minW = Math.max(1, Math.min(rectWidth(rect), rectWidth(cap.rect)));
+        const ovRatio = Math.max(0, ovX) / minW;
+        const allInCorridor = indices.every((idx) => coverageOf(eligible[idx].rect, corridor) >= 0.85);
+        const overlapOk =
+          ovRatio >= options.minCaptionOverlapRatio ||
+          (sideLabel === "above" && allInCorridor && (ovX > 0 || horizGap <= 16));
+        if (!overlapOk) continue;
+
+        const gapAllow = captionGapAllowance(cap.rect, rect, pageWidth, options);
+        const members = indices.map((idx) => eligible[idx]);
+        const allowCorridorGap80 =
+          members.some((m) => m.poolType === "region" || (m.kind === "path" && m.poolType === "unabsorbed")) ||
+          hasVerticalStack ||
+          hasSubMinArea;
+
+        let gap = Infinity;
+        if (sideLabel === "above") {
+          const aboveGap = rect[1] - cap.rect[3];
+          if (aboveGap < -maxOverlap || aboveGap > 80) continue;
+          if (!proposalSightClear(rect, cap.rect, "above", prose, otherCaps, tableRects)) continue;
+          const bridged = labelBridgedGap(rect, cap.rect, labelCandidates, "above");
+          const withinGap =
+            aboveGap <= gapAllow || (bridged.hasLabelsInGap && bridged.gap <= gapAllow) || allowCorridorGap80;
+          if (!withinGap) continue;
+          gap = Math.max(0, aboveGap);
+        } else {
+          if (rect[0] < propLeft - 4 || rect[2] > propRight + 4 || ovRatio < options.minCaptionOverlapRatio) continue;
+          const belowGap = cap.rect[1] - rect[3];
+          if (belowGap < -maxOverlap || belowGap > 48) continue;
+          if (!proposalSightClear(rect, cap.rect, "below", prose, otherCaps, tableRects)) continue;
+          const bridged = labelBridgedGap(rect, cap.rect, labelCandidates, "below");
+          if (!(belowGap <= gapAllow || (bridged.hasLabelsInGap && bridged.gap <= gapAllow) || allowCorridorGap80)) {
+            continue;
+          }
+          gap = Math.max(0, belowGap) + 1;
+        }
+
+        const regMid = (rect[0] + rect[2]) / 2;
+        const capMid = (cap.rect[0] + cap.rect[2]) / 2;
+        const centerDist = Math.abs(regMid - capMid) / Math.max(1, pageWidth);
+        const colSpanRatio = rectWidth(rect) / Math.max(1, propColW);
+        const columnFitBonus = isWideCol ? (colSpanRatio >= 0.45 ? 0.25 : 0) : colSpanRatio >= 0.45 ? 0.25 : 0;
+        const kindBonus = members.some((m) => m.kind === "form" || m.kind === "image") ? 0.05 : 0;
+        const multiPanelBonus = indices.length > 1 ? 0.15 : 0;
+        const sideBonus = sideLabel === "above" ? 1 : 0;
+        const score =
+          sideBonus +
+          ovRatio * 1.5 +
+          Math.max(0, 1 - gap / 80) +
+          Math.min(0.4, areaRatioOf(rect, pageRect) * 2) +
+          columnFitBonus +
+          multiPanelBonus +
+          kindBonus -
+          centerDist * 0.4;
+
+        matches.push({ ci, indices, rect, cap, side: sideLabel, gap, score });
+      }
+    };
+
+    if (corridorAboveItems.length) {
+      const aboveGroups = buildCorridorProposalClusters(
+        corridorAboveItems,
+        eligible,
+        allBlockers,
+        prose,
+        otherCaps,
+        textLayout,
+        captions,
+        pageRect,
+        options,
+      );
+      evaluateGroups("above", aboveGroups);
+    }
+    if (corridorBelowItems.length) {
+      const belowGroups = buildCorridorProposalClusters(
+        corridorBelowItems,
+        eligible,
+        allBlockers,
+        prose,
+        otherCaps,
+        textLayout,
+        captions,
+        pageRect,
+        options,
+      );
+      evaluateGroups("below", belowGroups);
+    }
+  }
+  if (!matches.length) {
+    return { linkedCount: 0, recoveredIndexes, proposalCount: 0, conflictCount: 0, conflictedCaptions };
+  }
+
+  matches.sort((a, b) => b.score - a.score);
+  const usedCaps = new Set();
+  const usedCands = new Set();
+  const recoveredUnabsorbed = new Set();
+  let linkedCount = 0;
+  let conflictCount = 0;
+
+  for (const m of matches) {
+    if (usedCaps.has(m.ci)) continue;
+    const itemConflict = m.indices.some((idx) => usedCands.has(idx));
+    if (itemConflict || overlapsExistingRegion(m.rect, merged)) {
+      conflictCount += 1;
+      conflictedCaptions.add(captionKey(m.cap));
+      continue;
+    }
+
+    const group = new Set(m.indices);
+    for (let si = 0; si < eligible.length; si++) {
+      if (group.has(si) || usedCands.has(si)) continue;
+      const sib = eligible[si];
+      if (
+        iou(m.rect, sib.rect) >= 0.5 ||
+        coverageOf(sib.rect, m.rect) >= 0.85 ||
+        coverageOf(m.rect, sib.rect) >= 0.85
+      ) {
+        group.add(si);
+      }
+    }
+
+    let rect = [...m.rect];
+    const sourceKinds = [];
+    const placementIndexes = [];
+    let placementCount = 0;
+    for (const idx of group) {
+      const item = eligible[idx];
+      rect = unionRect(rect, item.rect);
+      for (const sk of item.kinds) sourceKinds.push(sk);
+      for (const pIdx of item.placementIndexes) {
+        if (!placementIndexes.includes(pIdx)) placementIndexes.push(pIdx);
+      }
+      placementCount += item.placementCount;
+    }
+
+    const score = scoreRegion({
+      kinds: sourceKinds,
+      caption: m.cap,
+      link: { gap: m.gap, side: m.side },
+      rect,
+      pageRect,
+      structTagged: false,
+      options,
+    });
+    score.evidence.push("unlinked-orphan-recovery");
+    if (group.size > 1) score.evidence.push("multi-panel-proposal");
+    const built = buildRegion(rect, score, placementCount, placementIndexes, options);
+    if (!built.accepted) continue;
+
+    usedCaps.add(m.ci);
+    for (const idx of group) {
+      usedCands.add(idx);
+      const item = eligible[idx];
+      if (item.poolType === "region") absorbedRejectedRegions.add(item.ref);
+      else if (item.poolType === "unabsorbed") recoveredUnabsorbed.add(item.ref);
+      else if (item.poolType === "rejected" && item.ref.index != null) recoveredIndexes.add(item.ref.index);
+    }
+    merged.push(built);
+    linkedCount += 1;
+  }
+
+  if (recoveredUnabsorbed.size > 0) {
+    for (let i = unabsorbed.length - 1; i >= 0; i--) {
+      if (recoveredUnabsorbed.has(unabsorbed[i])) unabsorbed.splice(i, 1);
+    }
+  }
+
+  return {
+    linkedCount,
+    recoveredIndexes,
+    proposalCount: matches.length,
+    conflictCount,
+    conflictedCaptions,
+  };
+}
+
 /**
  * PDFFigures 2.0-inspired caption proposal corridor + global conflict-free
  * reconciliation for orphaned captions whose figure already exists in an
  * unanchored region above them (e.g. multi-row panel grids with tall tick
  * labels exceeding `maxCaptionGapPt`, or stacked unanchored upper bands inside
- * an empty column proposal corridor), plus orphan recovery for compact
- * wide/tall charts exceeding `maxAspect`.
+ * an empty column proposal corridor), plus orphan recovery for unlinked valid
+ * graphics, multi-panel groups, and compact wide/tall charts exceeding `maxAspect`.
  */
 function reconcileWithCaptionProposals(
   merged,
   allRegions,
   unabsorbed,
+  rejected,
   absorbedRejectedRegions,
   evaluated,
   captions,
@@ -1820,33 +2383,28 @@ function reconcileWithCaptionProposals(
   options,
 ) {
   const recoveredIndexes = new Set();
-  if (!captions?.length) return { linkedCount: 0, recoveredIndexes };
+  const conflictedCaptions = new Set();
+  if (!captions?.length) {
+    return {
+      linkedCount: 0,
+      recoveredIndexes,
+      proposalCount: 0,
+      proposalConflictCount: 0,
+      conflictedCaptions,
+    };
+  }
   const pageWidth = rectWidth(pageRect);
-  const midX = (pageRect[0] + pageRect[2]) / 2;
 
-  const isCaptionAlreadyCovered = (cap) => {
-    const key = captionKey(cap);
-    for (const region of merged) {
-      if (region.captionNumber != null && String(region.captionNumber) === String(cap.number)) {
-        return true;
-      }
-      if (region.captionRects?.some((cr) => Math.abs(cr[0] - cap.rect[0]) < 1 && Math.abs(cr[1] - cap.rect[1]) < 1)) {
-        return true;
-      }
-      if (!region.caption) continue;
-      const ovX = Math.min(region.rect[2], cap.rect[2]) - Math.max(region.rect[0], cap.rect[0]);
-      const minW = Math.min(rectWidth(region.rect), rectWidth(cap.rect));
-      const gap = region.rect[1] - cap.rect[3];
-      if (ovX >= options.minCaptionOverlapRatio * minW && gap >= -options.maxCaptionOverlapPt && gap <= 36) {
-        return true;
-      }
-    }
-    void key;
-    return false;
-  };
-
-  let orphanCaptions = captions.filter((cap) => !isCaptionAlreadyCovered(cap));
-  if (!orphanCaptions.length) return { linkedCount: 0, recoveredIndexes };
+  let orphanCaptions = captions.filter((cap) => !isCaptionCoveredByRegions(cap, merged, options));
+  if (!orphanCaptions.length) {
+    return {
+      linkedCount: 0,
+      recoveredIndexes,
+      proposalCount: 0,
+      proposalConflictCount: 0,
+      conflictedCaptions,
+    };
+  }
 
   const prose = textLayout?.proseBlockers ?? [];
   const capBlockers = textLayout?.captionBlockers ?? [];
@@ -1855,30 +2413,12 @@ function reconcileWithCaptionProposals(
     ...((textLayout?.tableTerritories ?? []).map((t) => t.rect)),
   ];
 
-  const proposals = [];
-  if (merged?.length) {
-    for (let ci = 0; ci < orphanCaptions.length; ci++) {
-      const cap = orphanCaptions[ci];
-      const cr = cap.rect;
-      const center = (cr[0] + cr[2]) / 2;
-      const isWide =
-        rectWidth(cr) >= pageWidth * 0.45 ||
-        (cr[0] < midX - 24 && cr[2] > midX + 24) ||
-        Math.abs(center - midX) <= 36;
-      const propLeft = isWide || center < midX ? pageRect[0] + 18 : midX + 2;
-      const propRight = isWide || center >= midX ? pageRect[2] - 18 : midX - 2;
-      const corridor = buildProposalCorridor(cap, propLeft, propRight, merged, textLayout, pageRect, options);
-      if (!corridor) continue;
-      proposals.push({
-        ci,
-        cap,
-        corridor,
-        ceilingY: corridor[3],
-      });
-    }
-  }
+  const proposals = buildProposalCorridors(orphanCaptions, merged, textLayout, pageRect, options);
 
   let linkedCount = 0;
+  let proposalCount = 0;
+  let proposalConflictCount = 0;
+
   if (merged?.length && proposals.length) {
     const candidates = [];
     for (const prop of proposals) {
@@ -1905,6 +2445,7 @@ function reconcileWithCaptionProposals(
         candidates.push({ ci, ri, prop, gap: Math.max(0, gap), score });
       }
     }
+    proposalCount += candidates.length;
 
     if (candidates.length) {
       candidates.sort((a, b) => b.score - a.score);
@@ -1912,7 +2453,12 @@ function reconcileWithCaptionProposals(
       const usedRegs = new Set();
 
       for (const match of candidates) {
-        if (usedCaps.has(match.ci) || usedRegs.has(match.ri)) continue;
+        if (usedCaps.has(match.ci)) continue;
+        if (usedRegs.has(match.ri)) {
+          proposalConflictCount += 1;
+          conflictedCaptions.add(captionKey(match.prop.cap));
+          continue;
+        }
         usedCaps.add(match.ci);
         usedRegs.add(match.ri);
 
@@ -1958,8 +2504,28 @@ function reconcileWithCaptionProposals(
         linkedCount += 1;
       }
     }
-    orphanCaptions = captions.filter((cap) => !isCaptionAlreadyCovered(cap));
+    orphanCaptions = captions.filter((cap) => !isCaptionCoveredByRegions(cap, merged, options));
   }
+
+  const unlinkedRecovered = recoverUnlinkedGraphicsForOrphans({
+    orphanCaptions,
+    merged,
+    allRegions,
+    unabsorbed,
+    rejected,
+    absorbedRejectedRegions,
+    evaluated,
+    captions,
+    textLayout,
+    pageRect,
+    options,
+  });
+  linkedCount += unlinkedRecovered.linkedCount;
+  proposalCount += unlinkedRecovered.proposalCount;
+  proposalConflictCount += unlinkedRecovered.conflictCount;
+  for (const ck of unlinkedRecovered.conflictedCaptions) conflictedCaptions.add(ck);
+  for (const idx of unlinkedRecovered.recoveredIndexes) recoveredIndexes.add(idx);
+  orphanCaptions = captions.filter((cap) => !isCaptionCoveredByRegions(cap, merged, options));
 
   const recovered = recoverExtremeAspectForOrphans({
     orphanCaptions,
@@ -1973,7 +2539,110 @@ function reconcileWithCaptionProposals(
   linkedCount += recovered.linkedCount;
   for (const idx of recovered.recoveredIndexes) recoveredIndexes.add(idx);
 
-  return { linkedCount, recoveredIndexes };
+  return {
+    linkedCount,
+    recoveredIndexes,
+    proposalCount,
+    proposalConflictCount,
+    conflictedCaptions,
+  };
+}
+
+function isExplicitlyBoundToRegion(cap, regions) {
+  for (const r of regions ?? []) {
+    if (r.captionNumber != null && String(r.captionNumber) === String(cap.number)) return true;
+    if (r.captionRects?.some((cr) => Math.abs(cr[0] - cap.rect[0]) < 1 && Math.abs(cr[1] - cap.rect[1]) < 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Summarize per-caption and page-level failure diagnostics without noisy logs.
+ */
+function summarizeStageCDiagnostics({
+  captions,
+  merged,
+  evaluated,
+  rejected,
+  conflictedCaptions,
+  proposalCount,
+  proposalLinks,
+  proposalConflictCount,
+  options,
+}) {
+  void proposalCount;
+  void proposalLinks;
+  void proposalConflictCount;
+  const counts = {
+    "no-caption-detected": 0,
+    "caption-without-graphics": 0,
+    "caption-link-failed": 0,
+    "candidate-rejected": 0,
+    "proposal-conflict": 0,
+    "region-accepted": 0,
+  };
+  const captionOutcomes = [];
+  let orphanCaptionCount = 0;
+
+  const claimedIndexes = new Set((merged ?? []).flatMap((r) => r.placementIndexes ?? []));
+  const unclaimedUsableGraphics = (evaluated ?? []).filter(
+    (c) => !claimedIndexes.has(c.index) && c.passesBasicFilter && !c.fullBleedFrame && !c.onlyThinRules,
+  );
+  const nonNoiseRejected = (rejected ?? []).filter(
+    (r) =>
+      r.reason !== "below-min-area" &&
+      r.reason !== "thin-decoration" &&
+      r.reason !== "off-page" &&
+      r.reason !== "empty-rect",
+  );
+
+  for (const cap of captions ?? []) {
+    const key = captionKey(cap);
+    if (
+      isExplicitlyBoundToRegion(cap, merged) ||
+      (!conflictedCaptions?.has(key) && isCaptionCoveredByRegions(cap, merged, options))
+    ) {
+      counts["region-accepted"] += 1;
+      captionOutcomes.push({
+        captionNumber: String(cap.number),
+        outcome: "region-accepted",
+      });
+      continue;
+    }
+
+    orphanCaptionCount += 1;
+    let outcome = "caption-without-graphics";
+    if (conflictedCaptions?.has(key)) {
+      outcome = "proposal-conflict";
+    } else if (unclaimedUsableGraphics.length > 0) {
+      outcome = "caption-link-failed";
+    } else if (
+      nonNoiseRejected.length > 0 ||
+      (rejected ?? []).some(
+        (r) =>
+          r.reason === "extreme-aspect" ||
+          r.reason === "below-confidence-threshold" ||
+          r.reason === "table-or-algorithm-region" ||
+          r.reason === "prose-blocker-collision" ||
+          r.reason === "unanchored-full-bleed-frame",
+      )
+    ) {
+      outcome = "candidate-rejected";
+    }
+    counts[outcome] += 1;
+    captionOutcomes.push({
+      captionNumber: String(cap.number),
+      outcome,
+    });
+  }
+
+  return {
+    orphanCaptionCount,
+    captionOutcomes,
+    failureReasonCounts: counts,
+  };
 }
 
 function isInsideTableCaptionRegion(rect, textLayout, captions) {
