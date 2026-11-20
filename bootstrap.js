@@ -18,6 +18,9 @@ var FigureColorBootstrap = {
   rootURI: "",
   started: false,
   pendingShutdown: null,
+  pendingUninstallWatcher: null,
+  shutdownHookRegistered: false,
+  activeCleanup: null,
 };
 
 /**
@@ -119,6 +122,7 @@ function figureColorPublish(plugin) {
  */
 function startup(data, reason) {
   try {
+    figureColorDisarmPendingUninstall();
     data = data || {};
     var rootURI = data.rootURI || FigureColorBootstrap.rootURI || "";
     if (data.id) FigureColorBootstrap.id = data.id;
@@ -177,6 +181,52 @@ function figureColorUninstallReason() {
 }
 
 /**
+ * Resolves Gecko's `AddonManager` (`sys.mjs` on Zotero 7.0.24+/10, `.jsm` fallback
+ * on older Zotero 7) to distinguish pending-undoable uninstall from final removal.
+ *
+ * @returns {object|null}
+ */
+function figureColorAddonManager() {
+  try {
+    if (typeof AddonManager !== "undefined" && AddonManager) return AddonManager;
+  } catch (ignored) {}
+  try {
+    if (typeof globalThis !== "undefined" && globalThis.AddonManager) return globalThis.AddonManager;
+  } catch (ignored) {}
+  try {
+    if (typeof ChromeUtils !== "undefined" && ChromeUtils) {
+      if (typeof ChromeUtils.importESModule === "function") {
+        try {
+          var mod = ChromeUtils.importESModule("resource://gre/modules/AddonManager.sys.mjs");
+          if (mod && mod.AddonManager) return mod.AddonManager;
+        } catch (ignored) {}
+      }
+      if (typeof ChromeUtils.import === "function") {
+        try {
+          var legacy = ChromeUtils.import("resource://gre/modules/AddonManager.jsm");
+          if (legacy && legacy.AddonManager) return legacy.AddonManager;
+        } catch (ignored) {}
+      }
+    }
+  } catch (ignored) {}
+  return null;
+}
+
+function figureColorDisarmPendingUninstall() {
+  var watcher = FigureColorBootstrap.pendingUninstallWatcher;
+  if (!watcher) return;
+  FigureColorBootstrap.pendingUninstallWatcher = null;
+  watcher.disarmed = true;
+  try {
+    if (watcher.addonManager && typeof watcher.addonManager.removeAddonListener === "function") {
+      watcher.addonManager.removeAddonListener(watcher.listener);
+    }
+  } catch (err) {
+    figureColorWarn("uninstall-remove-listener", err);
+  }
+}
+
+/**
  * Deletes only FigureGuard's own storage folder (`<Zotero Data Directory>/figureguard`)
  * on genuine uninstall. Never touches Zotero's other folders or attachments.
  *
@@ -204,9 +254,39 @@ async function figureColorRemovePersistentData() {
   }
 }
 
+function figureColorRunFinalCleanup() {
+  if (FigureColorBootstrap.activeCleanup) return FigureColorBootstrap.activeCleanup;
+  var task = (async function () {
+    try {
+      var pending = FigureColorBootstrap.pendingShutdown;
+      FigureColorBootstrap.pendingShutdown = null;
+      if (pending && typeof pending.then === "function") {
+        await pending;
+      }
+      var plugin = figureColorPlugin();
+      if (FigureColorBootstrap.started && plugin && typeof plugin.shutdown === "function") {
+        var extraPending = plugin.shutdown({ reason: figureColorUninstallReason(), uninstalling: true });
+        FigureColorBootstrap.started = false;
+        if (extraPending && typeof extraPending.then === "function") {
+          await extraPending;
+        }
+      }
+      await figureColorRemovePersistentData();
+    } catch (err) {
+      figureColorWarn("uninstall-cleanup", err);
+    } finally {
+      if (FigureColorBootstrap.activeCleanup === task) {
+        FigureColorBootstrap.activeCleanup = null;
+      }
+    }
+  })();
+  FigureColorBootstrap.activeCleanup = task;
+  return task;
+}
+
 /**
  * Called by Zotero before the extension is shut down.
- * Drains or aborts in-flight persistence writes safely before unload.
+ * Drains in-flight persistence writes safely before unload.
  *
  * @param {{id?: string, version?: string, rootURI?: string}} data
  * @param {number} reason
@@ -233,29 +313,28 @@ function shutdown(data, reason) {
 }
 
 /**
- * Called on install. The content script is only loaded in startup(), so there
- * is nothing to register yet.
+ * Called on install. Also disarms any prior pending-uninstall watcher if Undo
+ * restored the add-on.
  *
  * @param {{id?: string, version?: string, rootURI?: string}} data
  * @param {number} reason
  */
 function install(data, reason) {
-  // Intentionally empty: no chrome.manifest or preferences to write.
+  figureColorDisarmPendingUninstall();
 }
 
 /**
  * Called on uninstall/upgrade/downgrade.
  *
- * Only deletes FigureGuard's local cache and manual override directory when
- * `reason === ADDON_UNINSTALL` (6), preserving user data across Zotero shutdown,
- * disable, upgrade (7), and downgrade (8). Waits for any in-flight `shutdown()`
- * store drain so late writes cannot recreate the directory after removal.
+ * Only cleans up `<Zotero Data Directory>/figureguard` when
+ * `reason === ADDON_UNINSTALL` (6), preserving user data across Zotero exit,
+ * disable, upgrade (7), and downgrade (8).
  *
- * Note on Zotero 10.0.8 (`xpcom/plugins.js:921-957`): Zotero invokes
- * `uninstall()` inside `onUninstalling` and does not dispatch a bootstrap hook
- * at `onUninstalled`. If a user initiates uninstall (`reason === 6`) and then
- * triggers `onOperationCancelled` (Undo in Add-ons Manager), cleanup has already
- * run inside `uninstall()`.
+ * Because Zotero 10.0.8 (`xpcom/plugins.js:921-957`) invokes `uninstall()` at
+ * `onUninstalling` while the Add-ons Manager may still show an "Undo" option
+ * (`PENDING_UNINSTALL`), when `AddonManager` reports `PENDING_UNINSTALL` we
+ * defer deletion until `onUninstalled` commits (or Zotero exits without
+ * `onOperationCancelled`), keeping user data untouched if the user clicks Undo.
  *
  * @param {{id?: string, version?: string, rootURI?: string}} data
  * @param {number} reason
@@ -263,21 +342,79 @@ function install(data, reason) {
  */
 async function uninstall(data, reason) {
   if (reason !== figureColorUninstallReason()) return;
+  var addonId = (data && data.id) || FigureColorBootstrap.id;
   try {
-    var pending = FigureColorBootstrap.pendingShutdown;
-    FigureColorBootstrap.pendingShutdown = null;
-    if (pending && typeof pending.then === "function") {
-      await pending;
-    }
-    var plugin = figureColorPlugin();
-    if (FigureColorBootstrap.started && plugin && typeof plugin.shutdown === "function") {
-      var extraPending = plugin.shutdown({ reason: reason, uninstalling: true });
-      FigureColorBootstrap.started = false;
-      if (extraPending && typeof extraPending.then === "function") {
-        await extraPending;
+    var addonManager = figureColorAddonManager();
+    var addon = null;
+    if (addonManager && typeof addonManager.getAddonByID === "function") {
+      try {
+        addon = await addonManager.getAddonByID(addonId);
+      } catch (err) {
+        figureColorWarn("uninstall-addon-lookup", err);
       }
     }
-    await figureColorRemovePersistentData();
+
+    var pendingMask =
+      addonManager && typeof addonManager.PENDING_UNINSTALL === "number"
+        ? addonManager.PENDING_UNINSTALL
+        : 4;
+    var isPendingUndoable = Boolean(
+      addonManager &&
+        typeof addonManager.addAddonListener === "function" &&
+        addon &&
+        (addon.pendingOperations & pendingMask) !== 0
+    );
+
+    if (!isPendingUndoable) {
+      figureColorDisarmPendingUninstall();
+      await figureColorRunFinalCleanup();
+      return;
+    }
+
+    figureColorDisarmPendingUninstall();
+    var watcher = {
+      disarmed: false,
+      addonManager: addonManager,
+      listener: null,
+    };
+    watcher.listener = {
+      onOperationCancelled: function (target) {
+        if (watcher.disarmed || !target || target.id !== addonId) return;
+        figureColorDisarmPendingUninstall();
+      },
+      onUninstalled: function (target) {
+        if (watcher.disarmed || !target || target.id !== addonId) return;
+        figureColorDisarmPendingUninstall();
+        figureColorRunFinalCleanup();
+      },
+    };
+    FigureColorBootstrap.pendingUninstallWatcher = watcher;
+    addonManager.addAddonListener(watcher.listener);
+
+    var zotero = typeof Zotero !== "undefined" ? Zotero : (typeof globalThis !== "undefined" ? globalThis.Zotero : null);
+    if (zotero && typeof zotero.addShutdownListener === "function" && !FigureColorBootstrap.shutdownHookRegistered) {
+      FigureColorBootstrap.shutdownHookRegistered = true;
+      zotero.addShutdownListener(async function () {
+        if (FigureColorBootstrap.activeCleanup) {
+          await FigureColorBootstrap.activeCleanup;
+          return;
+        }
+        var liveWatcher = FigureColorBootstrap.pendingUninstallWatcher;
+        if (!liveWatcher || liveWatcher.disarmed) return;
+        figureColorDisarmPendingUninstall();
+        try {
+          var liveAddon =
+            typeof addonManager.getAddonByID === "function"
+              ? await addonManager.getAddonByID(addonId)
+              : null;
+          if (!liveAddon || (liveAddon.pendingOperations & pendingMask) !== 0) {
+            await figureColorRunFinalCleanup();
+          }
+        } catch (err) {
+          figureColorWarn("uninstall-shutdown-check", err);
+        }
+      });
+    }
   } catch (err) {
     figureColorWarn("uninstall-cleanup", err);
   }

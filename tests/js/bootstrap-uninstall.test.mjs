@@ -36,10 +36,16 @@ async function existsOnDisk(p) {
  * Zotero 10.0.8's plugin sandbox (`Zotero`, `IOUtils`, `PathUtils`, `Services`,
  * `REASONS`, and `content/index.js` scriptloader).
  */
-async function createBootstrapHarness({ dataDir, removeOverride = null, initialStore = null } = {}) {
+async function createBootstrapHarness({
+  dataDir,
+  removeOverride = null,
+  initialStore = null,
+  withAddonManager = false,
+} = {}) {
   const bootstrapSource = await readFile(path.join(repoRoot, "bootstrap.js"), "utf8");
   const warnings = [];
   const shutdownCalls = [];
+  const zoteroShutdownListeners = [];
   const io = {
     exists: existsOnDisk,
     readUTF8: (p) => readFile(p, "utf8"),
@@ -67,9 +73,31 @@ async function createBootstrapHarness({ dataDir, removeOverride = null, initialS
     },
     shutdown(opts = {}) {
       shutdownCalls.push(opts);
-      return activeStore?.close?.({ abortQueuedWrites: Boolean(opts?.uninstalling) || opts?.reason === 6 });
+      return activeStore?.close?.({ abortQueuedWrites: false });
     },
   };
+
+  const addonState = { id: "figure-guard@zotero.org", pendingOperations: 0 };
+  const addonListeners = new Set();
+  const addonManager = withAddonManager
+    ? {
+        PENDING_UNINSTALL: 4,
+        async getAddonByID(id) {
+          return id === addonState.id ? addonState : null;
+        },
+        addAddonListener(listener) {
+          addonListeners.add(listener);
+        },
+        removeAddonListener(listener) {
+          addonListeners.delete(listener);
+        },
+        emit(event, target = addonState) {
+          for (const listener of [...addonListeners]) {
+            listener?.[event]?.(target);
+          }
+        },
+      }
+    : null;
 
   const context = vm.createContext({
     APP_STARTUP: 1,
@@ -86,11 +114,26 @@ async function createBootstrapHarness({ dataDir, removeOverride = null, initialS
       getMainWindow() {
         return null;
       },
+      addShutdownListener(fn) {
+        zoteroShutdownListeners.push(fn);
+      },
     },
     PathUtils: {
       join: (...parts) => path.join(...parts),
     },
     IOUtils: io,
+    ...(addonManager
+      ? {
+          ChromeUtils: {
+            importESModule(spec) {
+              if (spec === "resource://gre/modules/AddonManager.sys.mjs") {
+                return { AddonManager: addonManager };
+              }
+              return null;
+            },
+          },
+        }
+      : {}),
     Services: {
       scriptloader: {
         loadSubScript() {
@@ -116,6 +159,12 @@ async function createBootstrapHarness({ dataDir, removeOverride = null, initialS
     context,
     warnings,
     shutdownCalls,
+    addonState,
+    addonListeners,
+    addonManager,
+    runZoteroShutdown: async () => {
+      await Promise.all(zoteroShutdownListeners.map((fn) => fn()));
+    },
     getStore: () => activeStore,
     setStore: (s) => {
       activeStore = s;
@@ -201,13 +250,85 @@ describe("bootstrap uninstall & Zotero lifecycle persistence cleanup (simulated 
     await Promise.allSettled([firstWrite, queuedWrite, shutdownPromise]);
     await uninstallPromise;
 
-    assert.equal(writeCount, 1, "queued second write aborted cleanly during uninstall");
+    assert.equal(writeCount, 2, "in-flight and already-queued writes finish draining cleanly before directory removal");
     assert.equal(await existsOnDisk(path.join(dataDir, "figureguard")), false, "figureguard dir deleted cleanly");
     assert.equal(await existsOnDisk(unrelatedFile), true, "unrelated Zotero storage untouched");
 
     // Verify settling extra microtasks never recreates figureguard/.
     await new Promise((r) => setTimeout(r, 15));
     assert.equal(await existsOnDisk(path.join(dataDir, "figureguard")), false, "no late async write recreates folder");
+  });
+
+  it("defers deletion during pending Undo window and preserves data on onOperationCancelled, deleting only when confirmed", async () => {
+    const dataDir = await makeTempDir();
+    const fgDir = path.join(dataDir, "figureguard");
+    const cacheFile = path.join(fgDir, "cache", "item-202.json");
+    const unrelatedFile = path.join(dataDir, "storage", "paper.pdf");
+    await mkdir(path.dirname(cacheFile), { recursive: true });
+    await mkdir(path.dirname(unrelatedFile), { recursive: true });
+    const seedContent = '{"schemaVersion":1,"manualOverrides":{"pages":{"1":[{"id":"ovr-1","op":"add","rect":[1,2,30,40]}]}}}';
+    await writeFile(cacheFile, seedContent, "utf8");
+    await writeFile(unrelatedFile, "pdf-bytes", "utf8");
+
+    const h = await createBootstrapHarness({ dataDir, withAddonManager: true });
+    const data = { id: "figure-guard@zotero.org", version: "0.7.5", rootURI: "resource://fg/" };
+    h.context.startup(data, 1);
+
+    // 1. User clicks Remove -> Zotero marks PENDING_UNINSTALL and invokes shutdown(6) + uninstall(6) in onUninstalling.
+    h.addonState.pendingOperations = h.addonManager.PENDING_UNINSTALL;
+    await h.context.shutdown(data, 6);
+    await h.context.uninstall(data, 6);
+    assert.equal(await existsOnDisk(cacheFile), true, "data MUST remain untouched while Undo option is open");
+    assert.equal(h.addonListeners.size, 1);
+
+    // 2. User clicks Undo -> AddonManager emits onOperationCancelled, then Zotero calls install(5) + startup(5).
+    h.addonState.pendingOperations = 0;
+    h.addonManager.emit("onOperationCancelled", h.addonState);
+    h.context.install(data, 5);
+    h.context.startup(data, 5);
+    assert.equal(h.addonListeners.size, 0, "watcher disarmed cleanly on Undo");
+    assert.equal(await readFile(cacheFile, "utf8"), seedContent, "manual overrides survive Undo intact");
+
+    // Subsequent Zotero shutdown does NOT remove the preserved data after Undo.
+    await h.context.shutdown(data, 2);
+    await h.runZoteroShutdown();
+    assert.equal(await readFile(cacheFile, "utf8"), seedContent, "data still preserved on exit after Undo");
+
+    // 3. User clicks Remove a second time AND closes Add-ons tab -> onUninstalled commits cleanup.
+    h.context.startup(data, 1);
+    h.addonState.pendingOperations = h.addonManager.PENDING_UNINSTALL;
+    await h.context.shutdown(data, 6);
+    await h.context.uninstall(data, 6);
+    assert.equal(await existsOnDisk(cacheFile), true, "still kept until onUninstalled fires");
+
+    h.addonState.pendingOperations = 0;
+    h.addonManager.emit("onUninstalled", h.addonState);
+    await h.runZoteroShutdown();
+    assert.equal(h.addonListeners.size, 0, "listener removed after onUninstalled");
+    assert.equal(await existsOnDisk(fgDir), false, "figureguard dir deleted after uninstall is confirmed");
+    assert.equal(await existsOnDisk(unrelatedFile), true, "unrelated user files preserved");
+  });
+
+  it("cleans up pending uninstall cleanly if Zotero quits without clicking Undo", async () => {
+    const dataDir = await makeTempDir();
+    const fgDir = path.join(dataDir, "figureguard");
+    const cacheFile = path.join(fgDir, "cache", "item-303.json");
+    await mkdir(path.dirname(cacheFile), { recursive: true });
+    await writeFile(cacheFile, '{"schemaVersion":1}', "utf8");
+
+    const h = await createBootstrapHarness({ dataDir, withAddonManager: true });
+    const data = { id: "figure-guard@zotero.org", version: "0.7.5", rootURI: "resource://fg/" };
+    h.context.startup(data, 1);
+
+    h.addonState.pendingOperations = h.addonManager.PENDING_UNINSTALL;
+    await h.context.shutdown(data, 6);
+    await h.context.uninstall(data, 6);
+    assert.equal(await existsOnDisk(cacheFile), true, "deferred while pending");
+
+    // User quits Zotero directly with pending uninstall still active (never clicked Undo).
+    await h.runZoteroShutdown();
+    assert.equal(h.addonListeners.size, 0);
+    assert.equal(await existsOnDisk(fgDir), false, "figureguard dir cleaned before Zotero exits with pending uninstall");
   });
 
   it("cleans up persistent data when uninstalled while already disabled and handles missing dir or IO errors safely", async () => {

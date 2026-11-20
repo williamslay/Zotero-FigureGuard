@@ -10,7 +10,7 @@ Detection logic lives in `src/core/` (pure functions, zero Zotero imports, direc
 
 Bootstrap:
 
-- `bootstrap.js` (284 lines): XPI bootstrap inside the chrome sandbox; loads `content/index.js`, registers/tears down across windows, and cleans up `<Zotero Data Directory>/figureguard` on `ADDON_UNINSTALL`.
+- `bootstrap.js` (421 lines): XPI bootstrap inside the chrome sandbox; loads `content/index.js`, registers/tears down across windows, and cleans up `<Zotero Data Directory>/figureguard` on confirmed uninstall (preserving data if pending removal is cancelled via `Undo`).
 
 Detection layer `src/core/`:
 
@@ -33,7 +33,7 @@ Integration layer `src/zotero/`:
 
 | File | Lines | Responsibility |
 | --- | --- | --- |
-| `main.js` | 2087 | Entry point: `startup`/`shutdown`, Notifier wiring, `renderToolbar` handler, localized toolbar toggle (`原色` / `Original`), global `FigureGuard` API, `probeAll()` |
+| `main.js` | 2086 | Entry point: `startup`/`shutdown`, Notifier wiring, `renderToolbar` handler, localized toolbar toggle (`原色` / `Original`), global `FigureGuard` API, `probeAll()` |
 | `reader-session.js` | 2320 | Single-reader lifecycle: realm resolution and ownership validation, document/page events, foreground-first priority queue, settled repaint checks |
 | `overlay.js` | 1026 | Overlay canvas mounting, cache-first detection, painting, geometry staleness (`geometryStale()`), and document connection (`isMounted()`) checks |
 | `persistent-figure-store.js` | 1337 | Per-attachment JSON store (`<Zotero Data Directory>/figureguard/cache/item-<id>.json`), IO-failure write protection, atomic writes, document replacement archival, manual override persistence |
@@ -102,8 +102,8 @@ Two GitHub Actions workflows (requiring only built-in `GITHUB_TOKEN`):
 
 ## Two-Tier Testing
 
-- `npm run test:ci` — Public CI tier; no copyrighted PDFs required. Runs PDF-free test files only (currently 21 files, 505 tests); `cancelled` must be 0.
-- `npm test` (`npm run test:fixture`) — Full maintainer regression (currently 28 files, 587 tests). Detection baselines rely on 5 copyrighted paper PDFs placed locally at the paths listed in [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md). When those PDFs are missing, 79 tests across 7 files are `cancelled` instead of failing, so full regression runs locally rather than as a public CI gate.
+- `npm run test:ci` — Public CI tier; no copyrighted PDFs required. Runs PDF-free test files only (currently 21 files, 507 tests); `cancelled` must be 0.
+- `npm test` (`npm run test:fixture`) — Full maintainer regression (currently 28 files, 589 tests). Detection baselines rely on 5 copyrighted paper PDFs placed locally at the paths listed in [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md). When those PDFs are missing, 79 tests across 7 files are `cancelled` instead of failing, so full regression runs locally rather than as a public CI gate.
 
 Always run tests via `npm test` or `npm run test:ci` (bare `node --test` triggers a spurious failure). Detection baselines (accepted region counts): PipeBWrite 18, FluidKV 18, Flash 10, Borges 9, plus HiKV fixtures. Whenever any threshold in `src/core/` changes, run `npm test` and verify these counts.
 

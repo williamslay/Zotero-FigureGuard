@@ -105,7 +105,7 @@ No. Figure Guard renders lightweight overlay canvases in the reader view layer o
 <details>
 <summary><b>Where are cached regions stored, and what happens when I update or uninstall?</b></summary>
 
-Cached detection boxes and manual overrides are stored per attachment as JSON files inside Zotero's data directory under `<Zotero Data Directory>/figureguard/cache/`. Your data is preserved when closing Zotero, disabling the add-on, or upgrading/downgrading versions. When you uninstall Zotero Figure Guard via Zotero Add-ons Manager, `<Zotero Data Directory>/figureguard/` is automatically removed (note: Zotero triggers bootstrap `uninstall` immediately when removal is initiated, before Undo in the Add-ons tab).
+Cached detection boxes and manual overrides are stored per attachment as JSON files inside Zotero's data directory under `<Zotero Data Directory>/figureguard/cache/`. Your data is preserved when closing Zotero, disabling the add-on, upgrading/downgrading versions, or clicking Undo after initiating removal. Once removal is confirmed in Zotero Add-ons Manager, `<Zotero Data Directory>/figureguard/` is automatically deleted.
 
 </details>
 

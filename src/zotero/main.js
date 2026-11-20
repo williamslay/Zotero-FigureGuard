@@ -1256,10 +1256,9 @@ export function startup(data = {}) {
 export function shutdown(options = {}) {
   let drainPromise;
   try {
-    const uninstalling = Boolean(options?.uninstalling) || options?.reason === 6;
     const activeStore = persistentStore;
     if (activeStore && typeof activeStore.close === "function") {
-      drainPromise = activeStore.close({ abortQueuedWrites: uninstalling });
+      drainPromise = activeStore.close({ abortQueuedWrites: false });
     }
     started = false;
     addonVersion = "";

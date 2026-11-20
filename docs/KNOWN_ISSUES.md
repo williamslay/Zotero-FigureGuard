@@ -40,7 +40,7 @@ Previously `repaintAttached()` and `onViewScaleChange()` ran all pages concurren
 
 ## 5. Test Count Synchronization — Synced
 
-After adding the bootstrap uninstall cleanup, persistent figure cache, manual override store, auto-update manifest tests, locale toggle tests, and Zotero-aligned layout/operator tests, counts in [DEVELOPMENT.md](./DEVELOPMENT.md) and [AGENTS.md](../AGENTS.md) are synced to `505` (CI tier) and `587` (full regression). Keep both updated whenever tests are added or removed.
+After adding the bootstrap uninstall/Undo cleanup, persistent figure cache, manual override store, auto-update manifest tests, locale toggle tests, and Zotero-aligned layout/operator tests, counts in [DEVELOPMENT.md](./DEVELOPMENT.md) and [AGENTS.md](../AGENTS.md) are synced to `507` (CI tier) and `589` (full regression). Keep both updated whenever tests are added or removed.
 
 ## 6. Unverified Items Checklist
 

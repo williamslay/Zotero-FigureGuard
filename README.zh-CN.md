@@ -105,7 +105,7 @@ Zotero 原生深色主题会把整页 PDF 无差别反色与重映射：正文�
 <details>
 <summary><b>图框缓存与手动修改保存在哪里？更新或卸载插件时会如何处理？</b></summary>
 
-自动识别结果与用户手动修改以每个附件独立的 JSON 文件形式保存在 `<Zotero 数据目录>/figureguard/cache/` 下。正常关闭 Zotero、禁用插件、升级或降级插件版本时，这些数据都会完整保留；在 Zotero 插件管理器中卸载 Figure Guard 时，插件会自动彻底清理 `<Zotero 数据目录>/figureguard/` 目录（注意：Zotero 10.0.8 在发起卸载阶段即触发 `uninstall()` 清理）。
+自动识别结果与用户手动修改以每个附件独立的 JSON 文件形式保存在 `<Zotero 数据目录>/figureguard/cache/` 下。正常关闭 Zotero、禁用插件、升级/降级插件版本，或在发起移除后点击“撤销（Undo）”时，这些数据都会完整保留；在 Zotero 插件管理器确认完成卸载后，插件会自动彻底清理 `<Zotero 数据目录>/figureguard/` 目录。
 
 </details>
 
