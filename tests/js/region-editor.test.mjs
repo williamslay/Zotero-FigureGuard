@@ -12,6 +12,7 @@ import {
   toViewportRect,
 } from "../../src/core/viewport.js";
 import { PAD_VIEWPORT, OVERLAY_CLASS, resetWarnOnce } from "../../src/zotero/overlay.js";
+import { PersistentFigureStore } from "../../src/zotero/persistent-figure-store.js";
 import {
   EDITOR_BACKDROP_CLASS,
   EDITOR_BOX_CLASS,
@@ -1297,5 +1298,151 @@ describe("region-editor: Zotero context menu, interactive editing, persistence &
       "取消此图原色保护",
       "手动添加原色区域…",
     ]);
+  });
+
+  it("persists Remove suppression when manual-add covers upgraded auto region (Case E) and preserves single replace across revision upgrade", async () => {
+    const dataDir = await makeTempDir();
+    installGeckoFsShim(dataDir);
+    const identity = { attachmentItemID: 777, storageKey: "777", fingerprint: "fp-upgrade-777" };
+    const manualM = [100, 200, 400, 500];
+    const autoA = { rect: [102, 202, 398, 498], captionNumber: "1", sourceKinds: ["image"] };
+
+    // Phase 1 (P1 #1 Case E): User adds M on rev 1 when page 5 auto is empty -> upgrade to rev 2 finds A -> Remove M.
+    const storeV1 = new PersistentFigureStore({ dataDir, detectorRevision: 1 });
+    await storeV1.savePageAutoCache(identity, 5, []);
+    await storeV1.addRegion(identity, 5, manualM);
+
+    const storeV2 = new PersistentFigureStore({ dataDir, detectorRevision: 2 });
+    const counters = { detectCalls: 0 };
+    const effAfterUpgrade = await storeV2.getEffectivePageRegions(identity, 5, async () => {
+      counters.detectCalls += 1;
+      return [autoA];
+    });
+    assert.equal(counters.detectCalls, 1);
+    assert.equal(effAfterUpgrade.regions.length, 1);
+    assert.equal(effAfterUpgrade.regions[0].origin, "manual-add");
+
+    // Click Remove on the active manual-add region M.
+    const removeRes = await storeV2.suppressRegion(identity, 5, effAfterUpgrade.regions[0]);
+    assert.equal(removeRes.ok, true);
+    assert.equal(removeRes.persisted, true);
+    assert.equal(removeRes.effective.regions.length, 0);
+
+    // Cross-restart: fresh PersistentFigureStore must keep Effective = [] without re-running detection!
+    const storeRestart = new PersistentFigureStore({ dataDir, detectorRevision: 2 });
+    const effRestart = await storeRestart.getEffectivePageRegions(identity, 5, async () => {
+      counters.detectCalls += 1;
+      return [autoA];
+    });
+    assert.equal(counters.detectCalls, 1, "restart uses persisted cache without re-detection");
+    assert.deepEqual(effRestart.regions, [], "superseded auto region stays suppressed across restart");
+    assert.equal(effRestart.overrides.length, 1);
+    assert.equal(effRestart.overrides[0].op, "suppress");
+
+    // Phase 2 (P1 #2 across revision upgrade): Page 6 auto A1 -> replace R1 -> upgrade to A2 -> replace again -> Reset.
+    const autoA1 = { rect: [100, 200, 400, 500], captionNumber: "2", sourceKinds: ["image"] };
+    const autoA2 = { rect: [145, 200, 445, 500], captionNumber: "2", sourceKinds: ["image"] };
+    const storeRev1 = new PersistentFigureStore({ dataDir, detectorRevision: 1 });
+    const p6v1 = await storeRev1.getEffectivePageRegions(
+      { attachmentItemID: 778, storageKey: "778", fingerprint: "fp-upgrade-778" },
+      6,
+      async () => [autoA1],
+    );
+    const id778 = { attachmentItemID: 778, storageKey: "778", fingerprint: "fp-upgrade-778" };
+    const rep1 = await storeRev1.replaceRegion(id778, 6, p6v1.regions[0], [95, 195, 410, 510]);
+    const ovrId = rep1.override.id;
+
+    const storeRev2 = new PersistentFigureStore({ dataDir, detectorRevision: 2 });
+    const p6v2 = await storeRev2.getEffectivePageRegions(id778, 6, async () => [autoA2]);
+    assert.equal(p6v2.regions.length, 1);
+    assert.equal(p6v2.regions[0].overrideId, ovrId);
+
+    const rep2 = await storeRev2.replaceRegion(id778, 6, p6v2.regions[0], [90, 185, 430, 525]);
+    assert.equal(rep2.overrides.length, 1, "persistent store holds exactly one replace override");
+    assert.equal(rep2.override.id, ovrId);
+    assert.deepEqual(rep2.effective.regions[0].rect, [90, 185, 430, 525]);
+
+    const resetP6 = await storeRev2.resetOverride(id778, 6, rep2.effective.regions[0]);
+    assert.equal(resetP6.overrides.length, 0);
+    assert.deepEqual(resetP6.effective.regions[0].rect, autoA2.rect);
+    assert.equal(resetP6.effective.regions[0].origin, "auto");
+  });
+
+  it("handles end-to-end context-menu Remove when manual-add supersedes auto region without re-running detection or re-exposing auto box", async () => {
+    const dataDir = await makeTempDir();
+    installGeckoFsShim(dataDir);
+    const autoA = [102, 202, 398, 498];
+    const manualM = [100, 200, 400, 500];
+    const harness = makeFakeReaderHarness({
+      dataDir,
+      itemID: 888,
+      tabID: "tab-888",
+      fingerprint: "fp-888",
+      scale: 1,
+      pages: [{ id: 1, figRect: autoA, caption: "Figure 1: Superseded" }],
+    });
+    const { registered } = installMultiReaderZotero({
+      dataDir,
+      readersByTab: { [harness.reader.tabID]: harness.reader },
+    });
+
+    startup({ id: "figure-guard@zotero.org", version: "0.7.5" });
+    await flushMicrotasks();
+    harness.renderToolbar(registered);
+    const [session] = getSessions();
+    await session.start();
+    await flushMicrotasks();
+
+    const opsAfterInit = harness.counters.getOperatorList;
+    assert.equal(opsAfterInit, 1);
+
+    const pv = harness.pageViews[0];
+    const pr = pv.div.getBoundingClientRect();
+
+    // Manually add M tightly covering existing auto A (IoU >= 0.85 -> M supersedes A in Effective Regions).
+    session.startAddRegion({ pageNumber: 1, pageView: pv });
+    const backdrop = pv.div.querySelector(`.${EDITOR_BACKDROP_CLASS}`);
+    const mVp = toViewportRect(manualM, pv.viewport);
+    backdrop.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 1, clientX: pr.left + mVp[0], clientY: pr.top + mVp[1] });
+    harness.doc.dispatchEvent({ type: "pointermove", pointerId: 1, clientX: pr.left + mVp[2], clientY: pr.top + mVp[3] });
+    harness.doc.dispatchEvent({ type: "pointerup", pointerId: 1, clientX: pr.left + mVp[2], clientY: pr.top + mVp[3] });
+    pv.div.querySelector(`.${EDITOR_CONFIRM_CLASS}`).dispatchEvent({ type: "click" });
+    await flushMicrotasks();
+
+    const effWithManual = await getEffectiveRegions(session, 1);
+    assert.equal(effWithManual.regions.length, 1);
+    assert.equal(effWithManual.regions[0].origin, "manual-add");
+    assert.equal(pv.div.querySelectorAll(`.${OVERLAY_CLASS}`).length, 1);
+
+    // Right-click inside M -> click Remove Original Color Protection -> A MUST stay suppressed!
+    const centerX = pr.left + (mVp[0] + mVp[2]) / 2;
+    const centerY = pr.top + (mVp[1] + mVp[3]) / 2;
+    const menu1 = harness.openContextMenuAtClient(registered, centerX, centerY);
+    assert.deepEqual(menu1.map((i) => i.label), [
+      "调整原色范围…",
+      "取消此图原色保护",
+      "恢复自动识别范围",
+      "手动添加原色区域…",
+    ]);
+    menu1[1].onCommand();
+    await flushMicrotasks();
+
+    const effAfterRemove = await getEffectiveRegions(session, 1);
+    assert.equal(effAfterRemove.regions.length, 0, "auto A must not reappear after Remove on superseding manual-add");
+    assert.equal(effAfterRemove.overrides[0]?.op, "suppress");
+    assert.equal(pv.div.querySelectorAll(`.${OVERLAY_CLASS}`).length, 0, "DOM overlay canvas removed cleanly");
+    assert.equal(harness.counters.getOperatorList, opsAfterInit, "Remove must not trigger detection");
+
+    // Right-click suppressed spot -> Reset restores A!
+    const menuRecover = harness.openContextMenuAtClient(registered, centerX, centerY);
+    assert.deepEqual(menuRecover.map((i) => i.label), ["恢复自动识别范围", "手动添加原色区域…"]);
+    menuRecover[0].onCommand();
+    await flushMicrotasks();
+
+    const effRecovered = await getEffectiveRegions(session, 1);
+    assert.equal(effRecovered.regions.length, 1);
+    assert.equal(effRecovered.regions[0].origin, "auto");
+    assert.equal(pv.div.querySelectorAll(`.${OVERLAY_CLASS}`).length, 1);
+    assert.equal(harness.counters.getOperatorList, opsAfterInit, "Reset must not trigger detection");
   });
 });

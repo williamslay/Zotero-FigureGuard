@@ -80,7 +80,7 @@ Tests are organized into two tiers.
 npm run test:ci
 ```
 
-Runs only the PDF-free test files (currently 22 files, 521 tests). All tests must execute and pass with `cancelled: 0`. This is the exact gate run by GitHub Actions CI.
+Runs only the PDF-free test files (currently 22 files, 531 tests). All tests must execute and pass with `cancelled: 0`. This is the exact gate run by GitHub Actions CI.
 
 ### Level 2 — Full Fixture Regression (requires local PDFs)
 
@@ -88,7 +88,7 @@ Runs only the PDF-free test files (currently 22 files, 521 tests). All tests mus
 npm test              # equivalent to npm run test:fixture
 ```
 
-Runs the full maintainer suite (currently 29 files, 603 tests). Detection baselines rely on five academic paper PDFs that are copyrighted and not redistributed in this repository. Place them locally at the following paths (the first four at the repository root, the last one under `fixture/`):
+Runs the full maintainer suite (currently 29 files, 613 tests). Detection baselines rely on five academic paper PDFs that are copyrighted and not redistributed in this repository. Place them locally at the following paths (the first four at the repository root, the last one under `fixture/`):
 
 ```text
 Borges_ A Low-Latency Distributed Shared Log on a CXL Memory_SSD Hybrid.pdf
