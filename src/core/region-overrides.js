@@ -551,12 +551,17 @@ export function removeOverride(overrides, overrideIdOrTarget, { autoRegions = []
  * Resolution rules:
  *   1. Match `suppress` and `replace` entries against `autoRegions` using
  *      stable region ID first, then caption/geometry fallback.
- *   2. Unmatched targets remain in `unresolvedOverrides` without misapplying
- *      to unrelated regions on the page.
- *   3. Apply `suppress` (drop region) and `replace` (swap bounding box without
- *      duplicating the original box).
- *   4. Append valid `add` regions, skipping redundant boxes when a later
- *      auto-detection already covers the same coordinates (`iou >= 0.85`).
+ *   2. Unmatched `suppress` entries remain in `unresolvedOverrides` without
+ *      hiding unrelated figures on the page.
+ *   3. Matched `replace` entries swap the target bounding box; unmatched
+ *      `replace` entries still render their saved manual bounding box
+ *      independently (while also recording in `unresolvedOverrides` for
+ *      diagnostics) and supersede any duplicate automatic box.
+ *   4. Manual `add` regions always take priority over automatic regions
+ *      (`Manual Region > Automatic Region`): if an automatic region overlaps
+ *      with `iou >= 0.85`, remove the redundant automatic box and keep the
+ *      exact manual bounding box and metadata. Distinct manual regions are
+ *      never merged or dropped.
  *
  * @param {Array<object>|null|undefined} autoRegions
  * @param {Array<object>|null|undefined} overrides
@@ -566,7 +571,9 @@ export function removeOverride(overrides, overrideIdOrTarget, { autoRegions = []
  *   matchedOverrideIds: string[],
  *   suppressedRegionIds: string[],
  *   replacedRegionIds: string[],
+ *   fallbackReplaceIds: string[],
  *   addedOverrideIds: string[],
+ *   supersededAutoIds: string[],
  *   dedupedAddIds: string[]
  * }}
  */
@@ -581,6 +588,7 @@ export function resolveEffectiveRegions(autoRegions, overrides) {
 
   const states = new Map();
   const unresolvedOverrides = [];
+  const unmatchedReplaceOverrides = [];
   const matchedOverrideIds = [];
   const addOverrides = [];
 
@@ -592,6 +600,9 @@ export function resolveEffectiveRegions(autoRegions, overrides) {
     const targetIdx = matchOverrideTarget(override, normalizedAuto);
     if (targetIdx === -1) {
       unresolvedOverrides.push({ ...override });
+      if (override.op === "replace") {
+        unmatchedReplaceOverrides.push(override);
+      }
       continue;
     }
     matchedOverrideIds.push(override.id);
@@ -602,7 +613,7 @@ export function resolveEffectiveRegions(autoRegions, overrides) {
     }
   }
 
-  const regions = [];
+  let regions = [];
   const suppressedRegionIds = [];
   const replacedRegionIds = [];
 
@@ -635,15 +646,43 @@ export function resolveEffectiveRegions(autoRegions, overrides) {
     });
   }
 
+  const supersededAutoIds = [];
+  const dropDuplicateAuto = (manualRect) => {
+    const remaining = [];
+    for (const existing of regions) {
+      if (existing.origin === "auto" && iou(existing.rect, manualRect) >= 0.85) {
+        supersededAutoIds.push(existing.id);
+        continue;
+      }
+      remaining.push(existing);
+    }
+    regions = remaining;
+  };
+
+  const fallbackReplaceIds = [];
+  for (const rep of unmatchedReplaceOverrides) {
+    dropDuplicateAuto(rep.rect);
+    fallbackReplaceIds.push(rep.id);
+    regions.push({
+      id: rep.id,
+      overrideId: rep.id,
+      rect: [...rep.rect],
+      originalRect: rep.targetOriginalRect ? [...rep.targetOriginalRect] : null,
+      captionNumber: rep.targetCaptionNumber ?? null,
+      caption: null,
+      kind: "manual",
+      sourceKinds: ["manual"],
+      confidence: 1,
+      origin: "manual-replace",
+      unresolvedTarget: true,
+    });
+  }
+
   const addedOverrideIds = [];
   const dedupedAddIds = [];
   for (const add of addOverrides) {
-    const duplicate =
-      add.allowDuplicate !== true &&
-      regions.some((existing) => iou(existing.rect, add.rect) >= 0.85);
-    if (duplicate) {
-      dedupedAddIds.push(add.id);
-      continue;
+    if (add.allowDuplicate !== true) {
+      dropDuplicateAuto(add.rect);
     }
     addedOverrideIds.push(add.id);
     regions.push({
@@ -665,7 +704,9 @@ export function resolveEffectiveRegions(autoRegions, overrides) {
     matchedOverrideIds,
     suppressedRegionIds,
     replacedRegionIds,
+    fallbackReplaceIds,
     addedOverrideIds,
+    supersededAutoIds,
     dedupedAddIds,
   };
 }

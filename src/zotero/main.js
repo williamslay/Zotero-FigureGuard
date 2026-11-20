@@ -1246,11 +1246,21 @@ export function startup(data = {}) {
 }
 
 /**
- * Called from bootstrap.js on shutdown: unregisters everything and removes all
- * overlays.
+ * Called from bootstrap.js on shutdown: stops new persistence writes, unregisters
+ * everything, closes sessions, and returns a promise settling once any in-flight
+ * store writes drain. Synchronous teardown runs immediately before returning.
+ *
+ * @param {{reason?: number, uninstalling?: boolean}} [options]
+ * @returns {Promise<void>|undefined}
  */
-export function shutdown() {
+export function shutdown(options = {}) {
+  let drainPromise;
   try {
+    const uninstalling = Boolean(options?.uninstalling) || options?.reason === 6;
+    const activeStore = persistentStore;
+    if (activeStore && typeof activeStore.close === "function") {
+      drainPromise = activeStore.close({ abortQueuedWrites: uninstalling });
+    }
     started = false;
     addonVersion = "";
     while (observers.length) removeWindowObserver(observers.pop());
@@ -1278,6 +1288,7 @@ export function shutdown() {
   } catch (err) {
     warnOnce("shutdown", err);
   }
+  return drainPromise;
 }
 
 /**

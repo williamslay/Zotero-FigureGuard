@@ -54,7 +54,7 @@ Zotero's built-in dark theme makes reading body text comfortable by inverting th
 - **Caption-anchored paper detection**: Built specifically for **academic research papers** with explicit figure captions (`Figure` / `Fig.` or PDF `/Figure` tags), detecting vector paths and embedded graphics (Form / Image XObjects) and merging grid or row-aligned subfigure panels into a unified region.
 - **Selective color restoration**: Overlays original-color canvases on detected figure boxes while preserving Zotero's dark background for body text.
 - **Responsive to reading flow**: Automatically re-renders across scrolling, zooming, page turns, window resizing, and tab switches, prioritizing the active foreground tab and visible pages.
-- **Document-scoped caching**: Caches detected regions by item and document fingerprint so reopening a paper skips re-detection.
+- **Persistent per-attachment cache**: Caches detected figure regions and manual overrides under `<Zotero Data Directory>/figureguard/` so reopening a paper skips re-detection.
 - **One-click toolbar toggle**: Adds a toggle button (`Original` / `原色` depending on Zotero's UI language) in the PDF reader toolbar so you can pause or re-enable protection anytime.
 - **Built-in update support**: Configured with Zotero's add-on update manifest so future releases can be checked and updated directly inside Zotero.
 
@@ -99,6 +99,13 @@ Once installed, future updates can be fetched directly inside Zotero via **Tools
 <summary><b>Does this plugin modify my PDF files?</b></summary>
 
 No. Figure Guard renders lightweight overlay canvases in the reader view layer only and never alters PDF files on disk or Zotero annotations.
+
+</details>
+
+<details>
+<summary><b>Where are cached regions stored, and what happens when I update or uninstall?</b></summary>
+
+Cached detection boxes and manual overrides are stored per attachment as JSON files inside Zotero's data directory under `<Zotero Data Directory>/figureguard/cache/`. Your data is preserved when closing Zotero, disabling the add-on, or upgrading/downgrading versions. When you uninstall Zotero Figure Guard via Zotero Add-ons Manager, `<Zotero Data Directory>/figureguard/` is automatically removed (note: Zotero triggers bootstrap `uninstall` immediately when removal is initiated, before Undo in the Add-ons tab).
 
 </details>
 

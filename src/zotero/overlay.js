@@ -511,6 +511,8 @@ export class PageOverlay {
      * tell whether its own paint pass is still the current one.
      */
     this.generation = 0;
+    /** Bumped on clear()/destroy() so in-flight detections abort before touching cache or disk. */
+    this.detectGeneration = 0;
     this.destroyed = false;
   }
 
@@ -602,9 +604,15 @@ export class PageOverlay {
           this.painted = true;
           return { regions: this.regionBoxes, regionKinds: this.regionKinds, diagnostics: this.diagnostics };
         };
+        const detectGen = this.detectGeneration;
+        const detectStale = (token = null) =>
+          this.destroyed ||
+          this.detectGeneration !== detectGen ||
+          this.documentId !== docKey ||
+          (token !== null && !this.regionCache.isCurrent(token));
         const run = (async () => {
           const identity = this.resolveIdentity ? await this.resolveIdentity() : null;
-          if (this.destroyed || this.documentId !== docKey) return null;
+          if (detectStale()) return null;
 
           const memCached = this.regionCache.get(docKey, this.pageNumber);
           if (memCached) {
@@ -627,7 +635,7 @@ export class PageOverlay {
             }
             if (autoEpochMatches && memCached.autoRegions !== undefined) {
               const diskCheck = await this.persistentStore.getPageAutoCache(identity, this.pageNumber);
-              if (this.destroyed || this.documentId !== docKey) return null;
+              if (detectStale()) return null;
               if (memCached.autoEpoch == null || diskCheck.autoEpoch === memCached.autoEpoch) {
                 const resolved = resolveEffectiveRegions(memCached.autoRegions, diskCheck.overrides);
                 this.regionCache.set(docKey, this.pageNumber, {
@@ -645,7 +653,7 @@ export class PageOverlay {
           const token = this.regionCache.begin(docKey, this.pageNumber);
           if (identity && this.persistentStore) {
             const disk = await this.persistentStore.getPageAutoCache(identity, this.pageNumber);
-            if (this.destroyed || !this.regionCache.isCurrent(token) || this.documentId !== docKey) return null;
+            if (detectStale(token)) return null;
             if (disk?.hit) {
               const autoRegions = disk.regions;
               const resolved = resolveEffectiveRegions(autoRegions, disk.overrides);
@@ -676,7 +684,7 @@ export class PageOverlay {
             // undefined keeps the core on its validated MEASURED_OP_CODES table.
             OPS: this.resolveOPS() ?? undefined,
           });
-          if (this.destroyed || !this.regionCache.isCurrent(token) || this.documentId !== docKey) return null;
+          if (detectStale(token)) return null;
 
           const rawRegions = result?.regions ?? [];
           const autoRegions = serializeAutoRegions(rawRegions);
@@ -691,7 +699,7 @@ export class PageOverlay {
               autoRegions,
               { expectedAutoEpoch: autoEpochBefore },
             );
-            if (this.destroyed || !this.regionCache.isCurrent(token) || this.documentId !== docKey) return null;
+            if (detectStale(token)) return null;
             if (saved?.reason === "stale-auto-epoch") return null;
             const resolved = resolveEffectiveRegions(autoRegions, saved?.overrides ?? []);
             effectiveRegions = resolved.regions;
@@ -983,6 +991,7 @@ export class PageOverlay {
   /** Removes every canvas of this page. Detection results stay cached. */
   clear() {
     this.cancel();
+    this.detectGeneration += 1;
     while (this.canvases.length) {
       const canvas = this.canvases.pop();
       try {

@@ -727,8 +727,12 @@ describe("persistent-figure-store: Test G (concurrency, corruption & IO error re
     const store = new PersistentFigureStore({ dataDir: dir });
     const regionCache = new RegionCache();
 
-    // Case 1: ReaderSession re-keys mid-flight while PageOverlay.detect() is waiting on doc A.
+    // Case 1: ReaderSession re-keys mid-flight while PageOverlay.detect() is waiting inside getOperatorList on doc A.
     const env = makeFakeReaderEnv({ itemID: 504, fingerprint: "fp-doc-a", pageSetup: { pageNumber: 1, withFigure: true } });
+    let markOpsStarted;
+    const opsStarted = new Promise((resolve) => {
+      markOpsStarted = resolve;
+    });
     let releaseDocAOps;
     const docAGate = new Promise((resolve) => {
       releaseDocAOps = resolve;
@@ -739,6 +743,7 @@ describe("persistent-figure-store: Test G (concurrency, corruption & IO error re
     const origTextA = env.pageView.pdfPage.getTextContent;
     env.pageView.pdfPage.getOperatorList = async () => {
       if (currentDoc === "A") {
+        markOpsStarted();
         await docAGate;
         return origGetOpsA();
       }
@@ -758,13 +763,15 @@ describe("persistent-figure-store: Test G (concurrency, corruption & IO error re
     const paintJob = session.attachPageNumber(1);
     const overlayA = session.overlays.get(1);
     const detectARun = overlayA.detectPromise;
+    await opsStarted;
 
-    // Document swaps to empty doc B under the same session before doc A's async detection resolves.
+    // Document swaps to empty doc B under the same session while doc A is paused in getOperatorList.
     currentDoc = "B";
     env.pdfDocument.fingerprints = ["fp-doc-b"];
     session.commitRekey("fcp:fp-doc-b", "test-swap");
     releaseDocAOps();
     await Promise.allSettled([paintJob, detectARun, ...session.pending]);
+    await store.getEntry("504").writeQueue;
 
     assert.deepEqual(
       regionCache.get("item:504|fcp:fp-doc-b", 1)?.regions ?? [],
@@ -969,5 +976,204 @@ describe("persistent-figure-store: main.js integration & Test F/H (clearCache vs
     assert.equal(effAfterReset.regions.length, 1);
     assert.equal(effAfterReset.regions[0].origin, "auto");
     assert.ok(getPersistentStore() instanceof PersistentFigureStore);
+  });
+});
+
+describe("persistent-figure-store: P0 IO failure safety & recovery", () => {
+  it("never overwrites valid disk JSON on transient read failures, and recovers existing manual overrides once IO recovers", async () => {
+    const dir = await makeTempDir();
+    installGeckoFsShim(dir);
+    const identity = { attachmentItemID: 701, fingerprint: "fp-p0-read" };
+
+    // Seed valid JSON on disk with autoCache and manual override.
+    const seedStore = new PersistentFigureStore({ dataDir: dir });
+    await seedStore.savePageAutoCache(identity, 1, [
+      { rect: [100, 460, 340, 620], captionNumber: "1", sourceKinds: ["image"] },
+    ]);
+    await seedStore.addRegion(identity, 1, [360, 120, 540, 280], { captionNumber: "9" });
+    const filePath = seedStore.getFilePath(701);
+    const originalDiskContent = await readFile(filePath, "utf8");
+
+    // Simulate transient readUTF8 failure while writes still succeed if attempted.
+    let failReads = true;
+    const flakyStore = new PersistentFigureStore({
+      dataDir: dir,
+      io: {
+        joinPath: globalThis.PathUtils.join,
+        isAvailable: () => true,
+        exists: globalThis.IOUtils.exists,
+        async readUTF8(p) {
+          if (failReads) throw new Error("EIO: temporary disk read error");
+          return globalThis.IOUtils.readUTF8(p);
+        },
+        makeDirectory: globalThis.IOUtils.makeDirectory,
+        writeUTF8Atomic: globalThis.IOUtils.writeUTF8,
+        move: globalThis.IOUtils.move,
+      },
+    });
+
+    // Detection in memory still succeeds, but auto-save / manual edits / invalidateAutoCache MUST NOT overwrite disk.
+    const page1 = makeFakePage({ pageNumber: 1, withFigure: true });
+    const overlay = new PageOverlay({
+      pageView: page1.pageView,
+      innerWin: page1.innerWin,
+      documentId: "item:701|fcp:fp-p0-read",
+      docId: "fcp:fp-p0-read",
+      regionCache: new RegionCache(),
+      persistentStore: flakyStore,
+      resolveIdentity: () => identity,
+    });
+    const inMemDetect = await overlay.detect();
+    assert.equal(inMemDetect.regions.length, 1, "reading continues via in-memory detection fallback");
+
+    const manualAttempt = await flakyStore.addRegion(identity, 2, [20, 20, 120, 120]);
+    assert.equal(manualAttempt.persisted, false, "unwritable session edit must explicitly report persisted: false");
+    const autoAttempt = await flakyStore.savePageAutoCache(identity, 3, []);
+    assert.equal(autoAttempt.persisted, false);
+    const invAttempt = await flakyStore.invalidateAutoCache(identity);
+    assert.equal(invAttempt.persisted, false);
+
+    assert.equal(
+      await readFile(filePath, "utf8"),
+      originalDiskContent,
+      "original disk JSON with manual overrides MUST NOT be overwritten during read failures",
+    );
+
+    // IO recovers -> store reads back the intact original file and resumes safe persistence.
+    failReads = false;
+    const recoveredPage1 = await flakyStore.getEffectivePageRegions(identity, 1);
+    assert.equal(recoveredPage1.source, "persistent-cache");
+    assert.equal(recoveredPage1.regions.length, 2, "pre-existing manual override on page 1 recovered cleanly");
+
+    const saveAfterRecovery = await flakyStore.savePageAutoCache(identity, 2, [
+      { rect: [40, 40, 240, 240], captionNumber: "2", sourceKinds: ["path"] },
+    ]);
+    assert.equal(saveAfterRecovery.persisted, true);
+    const updatedDisk = JSON.parse(await readFile(filePath, "utf8"));
+    assert.equal(updatedDisk.manualOverrides.pages["1"].length, 1, "original override preserved after recovery save");
+    assert.equal(updatedDisk.autoCache.pages["2"].regions.length, 1);
+  });
+
+  it("never treats exists() IO exceptions as missing file and never overwrites existing data", async () => {
+    const dir = await makeTempDir();
+    installGeckoFsShim(dir);
+    const identity = { attachmentItemID: 702, fingerprint: "fp-p0-exists" };
+
+    const seedStore = new PersistentFigureStore({ dataDir: dir });
+    await seedStore.addRegion(identity, 1, [50, 50, 200, 200]);
+    const filePath = seedStore.getFilePath(702);
+    const originalDiskContent = await readFile(filePath, "utf8");
+
+    let failExists = true;
+    const store = new PersistentFigureStore({
+      dataDir: dir,
+      io: {
+        joinPath: globalThis.PathUtils.join,
+        isAvailable: () => true,
+        async exists(p) {
+          if (failExists) throw new Error("EBUSY: exists probe failed");
+          return globalThis.IOUtils.exists(p);
+        },
+        readUTF8: globalThis.IOUtils.readUTF8,
+        makeDirectory: globalThis.IOUtils.makeDirectory,
+        writeUTF8Atomic: globalThis.IOUtils.writeUTF8,
+        move: globalThis.IOUtils.move,
+      },
+    });
+
+    const saveAttempt = await store.savePageAutoCache(identity, 1, [
+      { rect: [10, 10, 80, 80], sourceKinds: ["image"] },
+    ]);
+    assert.equal(saveAttempt.persisted, false);
+    assert.equal(saveAttempt.reason, "exists-check-failed");
+
+    const editAttempt = await store.suppressRegion(identity, 1, { rect: [10, 10, 80, 80] });
+    assert.equal(editAttempt.persisted, false);
+    assert.equal(await readFile(filePath, "utf8"), originalDiskContent, "disk file untouched when exists() fails");
+
+    failExists = false;
+    const recovered = await store.loadDocument(identity);
+    assert.equal(recovered.status, "loaded");
+    assert.equal(recovered.record.manualOverrides.pages["1"].length, 1);
+  });
+
+  it("refuses to overwrite corrupt JSON on disk when backup move fails", async () => {
+    const dir = await makeTempDir();
+    installGeckoFsShim(dir);
+    const identity = { attachmentItemID: 703, fingerprint: "fp-p0-corrupt" };
+
+    const seedPath = new PersistentFigureStore({ dataDir: dir }).getFilePath(703);
+    await mkdir(path.dirname(seedPath), { recursive: true });
+    const rawCorrupt = "{corrupt-but-valuable-user-data";
+    await writeFile(seedPath, rawCorrupt, "utf8");
+
+    const store = new PersistentFigureStore({
+      dataDir: dir,
+      io: {
+        joinPath: globalThis.PathUtils.join,
+        isAvailable: () => true,
+        exists: globalThis.IOUtils.exists,
+        readUTF8: globalThis.IOUtils.readUTF8,
+        makeDirectory: globalThis.IOUtils.makeDirectory,
+        writeUTF8Atomic: globalThis.IOUtils.writeUTF8,
+        async move() {
+          throw new Error("EPERM: backup denied");
+        },
+      },
+    });
+
+    const saveRes = await store.savePageAutoCache(identity, 1, [
+      { rect: [100, 100, 300, 300], sourceKinds: ["image"] },
+    ]);
+    assert.equal(saveRes.persisted, false);
+    assert.equal(saveRes.reason, "corrupt-backup-failed");
+    assert.equal(await readFile(seedPath, "utf8"), rawCorrupt, "corrupt original must not be overwritten if backup fails");
+  });
+});
+
+describe("persistent-figure-store: P2 identity stability (loadingTask.docId vs fingerprints)", () => {
+  it("never persists runtime loadingTask.docId as document fingerprint while keeping RegionCache functional", async () => {
+    const dir = await makeTempDir();
+    installGeckoFsShim(dir);
+    const store = new PersistentFigureStore({ dataDir: dir });
+
+    // pdfDocument with runtime loadingTask.docId only (no real fingerprints[0]).
+    const runtimeOnly = await resolveAttachmentIdentity({
+      reader: { itemID: 801 },
+      pdfDocument: { numPages: 3, loadingTask: { docId: "d0" } },
+      docId: "fcp:d0",
+    });
+    assert.equal(runtimeOnly, null, "ephemeral loadingTask.docId must not be persisted");
+
+    const runtimeTaskCustom = await resolveAttachmentIdentity({
+      reader: { itemID: 801 },
+      pdfDocument: { numPages: 3, loadingTask: { docId: "pdfjs_ephemeral_1" } },
+      docId: "fcp:pdfjs_ephemeral_1",
+    });
+    assert.equal(runtimeTaskCustom, null, "arbitrary loadingTask.docId without fingerprints[0] must not be persisted");
+
+    // Live PageOverlay still detects and caches in RegionCache using fcp:d0, with zero disk writes.
+    const regionCache = new RegionCache();
+    const { pageView, innerWin } = makeFakePage({ pageNumber: 1, withFigure: true });
+    pageView.pdfPage = pageView.pdfPage;
+    const identityResolver = () =>
+      resolveAttachmentIdentity({
+        reader: { itemID: 801 },
+        pdfDocument: { numPages: 3, loadingTask: { docId: "d0" } },
+        docId: "fcp:d0",
+      });
+    const overlay = new PageOverlay({
+      pageView,
+      innerWin,
+      documentId: "item:801|fcp:d0",
+      docId: "fcp:d0",
+      regionCache,
+      persistentStore: store,
+      resolveIdentity: identityResolver,
+    });
+    const res = await overlay.detect();
+    assert.equal(res.regions.length, 1, "in-memory detection and RegionCache still succeed");
+    assert.equal(regionCache.get("item:801|fcp:d0", 1)?.regions?.length, 1);
+    assert.equal(await store.io.exists(store.getFilePath(801)), false, "no disk file written for ephemeral docId");
   });
 });

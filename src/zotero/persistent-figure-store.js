@@ -200,21 +200,27 @@ export async function resolveAttachmentIdentity({
 } = {}) {
   const rawItem = itemID ?? reader?.itemID ?? null;
   let fingerprint = null;
+  let runtimeTaskId = null;
+  let inspectablePdfDoc = Boolean(pdfDocument);
   try {
     const fp = pdfDocument?.fingerprints?.[0];
     if (typeof fp === "string" && fp.trim()) {
       fingerprint = fp.trim();
-    } else {
-      const taskId = pdfDocument?.loadingTask?.docId ?? pdfDocument?._pdfDocument?.docId;
-      if (typeof taskId === "string" && taskId.trim()) {
-        fingerprint = taskId.trim();
-      }
+    }
+    const taskId = pdfDocument?.loadingTask?.docId ?? pdfDocument?._pdfDocument?.docId;
+    if (typeof taskId === "string" && taskId.trim()) {
+      runtimeTaskId = taskId.trim();
     }
   } catch {
-    // Xray wrapper prevented direct read; fall back to caller-supplied docId.
+    // Xray wrapper prevented direct property read; only allow non-ephemeral docId fallback below.
+    inspectablePdfDoc = false;
   }
-  if (!fingerprint && typeof docId === "string") {
-    fingerprint = docId;
+  if (!fingerprint && !inspectablePdfDoc && typeof docId === "string") {
+    const rawDoc = docId.trim();
+    const cleaned = rawDoc.startsWith("fcp:") ? rawDoc.slice(4).trim() : rawDoc;
+    if (cleaned && cleaned !== runtimeTaskId && !/^d\d+$/.test(cleaned)) {
+      fingerprint = rawDoc;
+    }
   }
 
   const base = normalizeAttachmentIdentity({
@@ -420,6 +426,8 @@ export class PersistentFigureStore {
     /** @type {Map<string, object>} storageKey -> per-attachment runtime state */
     this.entries = new Map();
     this.tmpCounter = 0;
+    this.closed = false;
+    this.abortQueuedWrites = false;
   }
 
   resolveDataDir() {
@@ -472,6 +480,8 @@ export class PersistentFigureStore {
         loadedSig: null,
         existsOnDisk: false,
         schemaLocked: false,
+        writeBlocked: false,
+        writeBlockedReason: null,
         autoEpoch: 1,
         overrideVersion: 1,
         loadPromise: null,
@@ -483,6 +493,25 @@ export class PersistentFigureStore {
       this.entries.set(storageKey, entry);
     }
     return entry;
+  }
+
+  /**
+   * Stops accepting new disk operations and waits for in-flight write queues
+   * to settle (used by shutdown and uninstall cleanup).
+   *
+   * @param {{abortQueuedWrites?: boolean}} [options]
+   * @returns {Promise<void>}
+   */
+  close({ abortQueuedWrites = false } = {}) {
+    this.closed = true;
+    if (abortQueuedWrites) {
+      this.abortQueuedWrites = true;
+    }
+    const queues = [];
+    for (const entry of this.entries.values()) {
+      queues.push(entry.writeQueue.catch(() => {}));
+    }
+    return Promise.allSettled(queues).then(() => undefined);
   }
 
   /**
@@ -511,22 +540,73 @@ export class PersistentFigureStore {
   }
 
   async backupCorruptFile(filePath, attachmentKey) {
+    if (!filePath || typeof this.io?.move !== "function") {
+      return { ok: false, error: "IOUtils.move is unavailable" };
+    }
     try {
-      if (!filePath || typeof this.io?.move !== "function") return;
       const dir = defaultDirname(filePath);
-      const stamp = Date.now().toString(36);
+      this.tmpCounter += 1;
+      const stamp = `${Date.now().toString(36)}-${this.tmpCounter}`;
       const backupPath = dir
         ? this.io.joinPath(dir, `item-${attachmentKey}.corrupt-${stamp}.json`)
         : `${filePath}.corrupt-${stamp}`;
       await this.io.move(filePath, backupPath);
-    } catch {
-      // Best-effort backup; caller already falls back cleanly.
+      return { ok: true, backupPath };
+    } catch (err) {
+      warnOnce("persistent-corrupt-backup", err);
+      return { ok: false, error: err?.message ?? String(err) };
     }
   }
 
+  shouldRetryDiskLoad(entry) {
+    if (!entry) return true;
+    if (entry.lastLoadStatus === "no-storage") return this.hasWritableStorage();
+    return (
+      entry.lastLoadStatus === "exists-failed" ||
+      entry.lastLoadStatus === "read-failed" ||
+      entry.lastLoadStatus === "corrupt-backup-failed"
+    );
+  }
+
+  async handleCorruptDiskFile(entry, identity, filePath, sig, err) {
+    warnOnce("persistent-corrupt-json", err);
+    const backup = await this.backupCorruptFile(filePath, identity.storageKey);
+    if (backup.ok) {
+      entry.record = createFreshRecord(identity);
+      entry.record.autoCache.detectorRevision = this.detectorRevision;
+      entry.loadedSig = sig;
+      entry.existsOnDisk = false;
+      entry.schemaLocked = false;
+      entry.writeBlocked = false;
+      entry.writeBlockedReason = null;
+      entry.dirtyReset = false;
+      entry.lastLoadStatus = "corrupt";
+      return entry.lastLoadStatus;
+    }
+    if (!entry.record || !documentMatches(entry.record.document, identity)) {
+      entry.record = createFreshRecord(identity);
+      entry.record.autoCache.detectorRevision = this.detectorRevision;
+    }
+    entry.loadedSig = sig;
+    entry.existsOnDisk = true;
+    entry.schemaLocked = false;
+    entry.writeBlocked = true;
+    entry.writeBlockedReason = "corrupt-backup-failed";
+    entry.dirtyReset = false;
+    entry.lastLoadStatus = "corrupt-backup-failed";
+    return entry.lastLoadStatus;
+  }
+
   async writeRecordToDisk(entry, filePath, record) {
-    if (entry.schemaLocked) {
-      return { ok: false, persisted: false, reason: "incompatible-schema-version" };
+    if (this.abortQueuedWrites) {
+      return { ok: false, persisted: false, reason: "store-closed" };
+    }
+    if (entry.writeBlocked || entry.schemaLocked) {
+      return {
+        ok: false,
+        persisted: false,
+        reason: entry.writeBlockedReason || "incompatible-schema-version",
+      };
     }
     if (!filePath || !this.hasWritableStorage()) {
       return { ok: false, persisted: false, reason: "no-storage" };
@@ -536,8 +616,14 @@ export class PersistentFigureStore {
     const tmpPath = `${filePath}.tmp-${Date.now().toString(36)}-${this.tmpCounter}`;
     const payload = JSON.stringify(record, null, 2);
     try {
+      if (this.abortQueuedWrites) {
+        return { ok: false, persisted: false, reason: "store-closed" };
+      }
       if (cacheDir && typeof this.io.makeDirectory === "function") {
         await this.io.makeDirectory(cacheDir);
+      }
+      if (this.abortQueuedWrites) {
+        return { ok: false, persisted: false, reason: "store-closed" };
       }
       await this.io.writeUTF8Atomic(filePath, payload, tmpPath);
       entry.existsOnDisk = true;
@@ -559,11 +645,15 @@ export class PersistentFigureStore {
     const sig = identitySignature(identity);
 
     if (!filePath || !this.hasWritableStorage()) {
-      entry.record = createFreshRecord(identity);
-      entry.record.autoCache.detectorRevision = this.detectorRevision;
+      if (!entry.record || !documentMatches(entry.record.document, identity)) {
+        entry.record = createFreshRecord(identity);
+        entry.record.autoCache.detectorRevision = this.detectorRevision;
+      }
       entry.loadedSig = sig;
       entry.existsOnDisk = false;
       entry.schemaLocked = false;
+      entry.writeBlocked = false;
+      entry.writeBlockedReason = null;
       entry.dirtyReset = false;
       entry.lastLoadStatus = "no-storage";
       return entry.lastLoadStatus;
@@ -574,7 +664,18 @@ export class PersistentFigureStore {
       exists = await this.io.exists(filePath);
     } catch (err) {
       warnOnce("persistent-exists", err);
-      exists = false;
+      if (!entry.record || !documentMatches(entry.record.document, identity)) {
+        entry.record = createFreshRecord(identity);
+        entry.record.autoCache.detectorRevision = this.detectorRevision;
+      }
+      entry.loadedSig = sig;
+      entry.existsOnDisk = true;
+      entry.schemaLocked = false;
+      entry.writeBlocked = true;
+      entry.writeBlockedReason = "exists-check-failed";
+      entry.dirtyReset = false;
+      entry.lastLoadStatus = "exists-failed";
+      return entry.lastLoadStatus;
     }
 
     if (!exists) {
@@ -583,6 +684,8 @@ export class PersistentFigureStore {
       entry.loadedSig = sig;
       entry.existsOnDisk = false;
       entry.schemaLocked = false;
+      entry.writeBlocked = false;
+      entry.writeBlockedReason = null;
       entry.dirtyReset = false;
       entry.lastLoadStatus = "missing";
       return entry.lastLoadStatus;
@@ -593,11 +696,15 @@ export class PersistentFigureStore {
       rawText = await this.io.readUTF8(filePath);
     } catch (err) {
       warnOnce("persistent-read", err);
-      entry.record = createFreshRecord(identity);
-      entry.record.autoCache.detectorRevision = this.detectorRevision;
+      if (!entry.record || !documentMatches(entry.record.document, identity)) {
+        entry.record = createFreshRecord(identity);
+        entry.record.autoCache.detectorRevision = this.detectorRevision;
+      }
       entry.loadedSig = sig;
-      entry.existsOnDisk = false;
+      entry.existsOnDisk = true;
       entry.schemaLocked = false;
+      entry.writeBlocked = true;
+      entry.writeBlockedReason = "read-failed";
       entry.dirtyReset = false;
       entry.lastLoadStatus = "read-failed";
       return entry.lastLoadStatus;
@@ -607,29 +714,17 @@ export class PersistentFigureStore {
     try {
       parsed = JSON.parse(rawText);
     } catch (err) {
-      warnOnce("persistent-corrupt-json", err);
-      await this.backupCorruptFile(filePath, identity.storageKey);
-      entry.record = createFreshRecord(identity);
-      entry.record.autoCache.detectorRevision = this.detectorRevision;
-      entry.loadedSig = sig;
-      entry.existsOnDisk = false;
-      entry.schemaLocked = false;
-      entry.dirtyReset = false;
-      entry.lastLoadStatus = "corrupt";
-      return entry.lastLoadStatus;
+      return this.handleCorruptDiskFile(entry, identity, filePath, sig, err);
     }
 
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      warnOnce("persistent-corrupt-json", new Error(`Invalid persistent JSON envelope for item ${identity.storageKey}`));
-      await this.backupCorruptFile(filePath, identity.storageKey);
-      entry.record = createFreshRecord(identity);
-      entry.record.autoCache.detectorRevision = this.detectorRevision;
-      entry.loadedSig = sig;
-      entry.existsOnDisk = false;
-      entry.schemaLocked = false;
-      entry.dirtyReset = false;
-      entry.lastLoadStatus = "corrupt";
-      return entry.lastLoadStatus;
+      return this.handleCorruptDiskFile(
+        entry,
+        identity,
+        filePath,
+        sig,
+        new Error(`Invalid persistent JSON envelope for item ${identity.storageKey}`),
+      );
     }
 
     if (parsed.schemaVersion !== PERSISTENT_SCHEMA_VERSION) {
@@ -642,12 +737,17 @@ export class PersistentFigureStore {
       entry.loadedSig = sig;
       entry.existsOnDisk = true;
       entry.schemaLocked = true;
+      entry.writeBlocked = true;
+      entry.writeBlockedReason = "incompatible-schema-version";
       entry.dirtyReset = false;
       entry.lastLoadStatus = "incompatible-schema";
       return entry.lastLoadStatus;
     }
 
+    const wasWriteBlocked = entry.writeBlocked;
     entry.schemaLocked = false;
+    entry.writeBlocked = false;
+    entry.writeBlockedReason = null;
     entry.existsOnDisk = true;
 
     const storedDoc = parsed.document && typeof parsed.document === "object" ? parsed.document : null;
@@ -698,6 +798,7 @@ export class PersistentFigureStore {
       };
       entry.loadedSig = sig;
       entry.autoEpoch += 1;
+      if (wasWriteBlocked) entry.overrideVersion += 1;
       entry.dirtyReset = hadAutoPages;
       entry.lastLoadStatus = "detector-revision-mismatch";
       return entry.lastLoadStatus;
@@ -726,6 +827,10 @@ export class PersistentFigureStore {
       },
       ...(archivedOverrides.length ? { archivedOverrides } : {}),
     };
+    if (wasWriteBlocked) {
+      entry.overrideVersion += 1;
+      entry.autoEpoch += 1;
+    }
     entry.loadedSig = sig;
     entry.dirtyReset = false;
     entry.lastLoadStatus = "loaded";
@@ -737,19 +842,20 @@ export class PersistentFigureStore {
    * per attachment and handling mid-session document replacement cleanly).
    */
   async ensureLoaded(identityInput) {
+    if (this.closed) return null;
     const identity = normalizeAttachmentIdentity(identityInput);
     if (!identity) return null;
 
     const entry = this.getEntry(identity.storageKey);
     const sig = identitySignature(identity);
 
-    if (entry.record && entry.lastLoadStatus !== "no-storage" && entry.loadedSig === sig) {
+    if (entry.record && !this.shouldRetryDiskLoad(entry) && entry.loadedSig === sig) {
       return { entry, identity, status: entry.lastLoadStatus };
     }
 
     if (
       entry.record &&
-      entry.lastLoadStatus !== "no-storage" &&
+      !this.shouldRetryDiskLoad(entry) &&
       !entry.schemaLocked &&
       documentMatches(entry.record.document, identity)
     ) {
@@ -775,13 +881,14 @@ export class PersistentFigureStore {
       } catch {
         // Previous write failure never blocks subsequent reads.
       }
+      if (this.closed) return entry.lastLoadStatus;
       // Re-check whether an earlier write operation already loaded/migrated this doc.
-      if (entry.record && entry.lastLoadStatus !== "no-storage" && entry.loadedSig === sig) {
+      if (entry.record && !this.shouldRetryDiskLoad(entry) && entry.loadedSig === sig) {
         return entry.lastLoadStatus;
       }
       if (
         entry.record &&
-        entry.lastLoadStatus !== "no-storage" &&
+        !this.shouldRetryDiskLoad(entry) &&
         !entry.schemaLocked &&
         documentMatches(entry.record.document, identity)
       ) {
@@ -805,6 +912,9 @@ export class PersistentFigureStore {
   }
 
   enqueueMutation(identityInput, mutator) {
+    if (this.closed) {
+      return Promise.resolve({ ok: false, persisted: false, reason: "store-closed" });
+    }
     const identity = normalizeAttachmentIdentity(identityInput);
     if (!identity) {
       return Promise.resolve({ ok: false, persisted: false, reason: "invalid-identity" });
@@ -815,9 +925,12 @@ export class PersistentFigureStore {
     const run = entry.writeQueue
       .catch(() => {})
       .then(async () => {
+        if (this.abortQueuedWrites) {
+          return { ok: false, persisted: false, reason: "store-closed" };
+        }
         if (
           !entry.record ||
-          (entry.lastLoadStatus === "no-storage" && this.hasWritableStorage()) ||
+          this.shouldRetryDiskLoad(entry) ||
           !documentMatches(entry.record.document, identity) ||
           (entry.schemaLocked && entry.loadedSig !== sig)
         ) {
@@ -830,6 +943,9 @@ export class PersistentFigureStore {
             entry.record.document.fileMtime = identity.fileMtime;
           }
           entry.loadedSig = sig;
+        }
+        if (this.abortQueuedWrites) {
+          return { ok: false, persisted: false, reason: "store-closed" };
         }
         return mutator(entry, identity);
       });
@@ -848,9 +964,9 @@ export class PersistentFigureStore {
       return { status: "invalid-identity", persisted: false, record: null };
     }
     const { entry, identity, status } = loaded;
-    let persisted = entry.existsOnDisk && !entry.dirtyReset && !entry.schemaLocked;
+    let persisted = entry.existsOnDisk && !entry.dirtyReset && !entry.schemaLocked && !entry.writeBlocked;
 
-    if (entry.dirtyReset && !entry.schemaLocked) {
+    if (entry.dirtyReset && !entry.schemaLocked && !entry.writeBlocked) {
       const flushResult = await this.enqueueMutation(identity, async (liveEntry, liveId) => {
         if (!liveEntry.dirtyReset) return { ok: true, persisted: liveEntry.existsOnDisk };
         const filePath = this.getFilePath(liveId.attachmentItemID);
@@ -962,6 +1078,7 @@ export class PersistentFigureStore {
         sameAutoRegions(existing.regions, cleanRegions) &&
         entry.record.autoCache.detectorRevision === this.detectorRevision &&
         !entry.dirtyReset &&
+        !entry.writeBlocked &&
         entry.existsOnDisk;
 
       const overrides = clonePageOverrides(entry.record, pageKey);

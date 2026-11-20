@@ -123,9 +123,9 @@ describe("region-overrides: pure resolveEffectiveRegions (Test F)", () => {
     assert.deepEqual(resolved.regions[1].rect, autoFig2.rect);
   });
 
-  it("adds a manual region on an empty page and deduplicates if later auto detection catches the same area", () => {
+  it("prioritizes manual add region over overlapping automatic detection (Manual > Automatic)", () => {
     const manualRect = [90, 460, 290, 640];
-    const { ok, overrides } = appendAddOverride([], manualRect, { captionNumber: "1" });
+    const { ok, override: addOvr, overrides } = appendAddOverride([], manualRect, { captionNumber: "1" });
     assert.equal(ok, true);
 
     const onEmpty = resolveEffectiveRegions([], overrides);
@@ -133,16 +133,89 @@ describe("region-overrides: pure resolveEffectiveRegions (Test F)", () => {
     assert.deepEqual(onEmpty.regions[0].rect, manualRect);
     assert.equal(onEmpty.regions[0].origin, "manual-add");
 
-    // Later detector upgrade discovers practically identical Figure 1 box.
+    // Later detector upgrade discovers practically identical Figure 1 box -> manual BBox MUST win, no duplicate.
     const laterAuto = serializeAutoRegions([{ rect: [88, 458, 292, 642], captionNumber: "1", sourceKinds: ["image"] }]);
     const afterDetect = resolveEffectiveRegions(laterAuto, overrides);
-    assert.equal(afterDetect.regions.length, 1, "does not paint duplicate stacked box over matched auto detection");
-    assert.equal(afterDetect.dedupedAddIds.length, 1);
+    assert.equal(afterDetect.regions.length, 1, "does not paint duplicate stacked box");
+    assert.deepEqual(afterDetect.regions[0].rect, manualRect, "manual BBox takes priority over auto BBox");
+    assert.equal(afterDetect.regions[0].origin, "manual-add");
+    assert.equal(afterDetect.regions[0].overrideId, addOvr.id);
+    assert.deepEqual(afterDetect.supersededAutoIds, [laterAuto[0].id]);
 
-    // Adjacent distinct manual box is still preserved.
+    // After resetting the manual add override, the auto region is restored cleanly.
+    const resetRes = removeOverride(overrides, addOvr.id);
+    const afterReset = resolveEffectiveRegions(laterAuto, resetRes.overrides);
+    assert.equal(afterReset.regions.length, 1);
+    assert.equal(afterReset.regions[0].origin, "auto");
+    assert.deepEqual(afterReset.regions[0].rect, [88, 458, 292, 642]);
+
+    // Adjacent distinct manual box is still preserved alongside the first manual box.
     const add2 = appendAddOverride(overrides, [320, 460, 520, 640]);
     const both = resolveEffectiveRegions(laterAuto, add2.overrides);
     assert.equal(both.regions.length, 2);
+  });
+
+  it("keeps slightly intersecting auto figure and distinct manual additions unmerged without resizing", () => {
+    const auto = serializeAutoRegions([
+      { rect: [100, 400, 300, 600], captionNumber: "1", sourceKinds: ["image"] },
+    ]);
+    // Slightly intersecting manual box (IoU << 0.85) must NOT delete adjacent auto region or resize user box.
+    const add1Rect = [260, 420, 420, 580];
+    const add2Rect = [265, 425, 425, 585];
+    let overrides = appendAddOverride([], add1Rect).overrides;
+    overrides = appendAddOverride(overrides, add2Rect, { allowDuplicate: true }).overrides;
+
+    const merged = resolveEffectiveRegions(auto, overrides);
+    assert.equal(merged.regions.length, 3, "adjacent auto figure and two manual adds stay distinct");
+    assert.deepEqual(merged.regions[0].rect, [100, 400, 300, 600]);
+    assert.deepEqual(merged.regions[1].rect, add1Rect);
+    assert.deepEqual(merged.regions[2].rect, add2Rect);
+  });
+
+  it("still renders unmatched manual replace BBox without breaking reset or unrelated suppress (Section 2)", () => {
+    const original = serializeAutoRegions([autoFig1]);
+    const adjustedRect = [70, 440, 315, 665];
+    const { ok, override: repOvr, overrides } = upsertReplaceOverride([], original[0].id, adjustedRect, {
+      autoRegions: original,
+    });
+    assert.equal(ok, true);
+
+    // Case 1: New detector fails to find any figure -> manual replace still renders and records diagnostic unresolved state.
+    const emptyAutoRes = resolveEffectiveRegions([], overrides);
+    assert.equal(emptyAutoRes.regions.length, 1, "unmatched replace must remain effective on empty auto result");
+    assert.deepEqual(emptyAutoRes.regions[0].rect, adjustedRect);
+    assert.equal(emptyAutoRes.regions[0].overrideId, repOvr.id);
+    assert.equal(emptyAutoRes.regions[0].origin, "manual-replace");
+    assert.equal(emptyAutoRes.unresolvedOverrides.length, 1);
+
+    // Case 2: New detector outputs a drastically shifted unrelated Figure 2 -> manual replace remains alongside it without suppressing Fig 2.
+    const shiftedUnrelated = serializeAutoRegions([autoFig2]);
+    const withSuppress = upsertSuppressOverride(overrides, {
+      targetRegionId: "missing-fig-3",
+      targetCaptionNumber: "3",
+      targetOriginalRect: [350, 100, 500, 300],
+    }).overrides;
+    const mixedRes = resolveEffectiveRegions(shiftedUnrelated, withSuppress);
+    assert.equal(mixedRes.regions.length, 2, "auto Fig 2 preserved + unmatched replace rendered; unmatched suppress does nothing");
+    assert.deepEqual(mixedRes.regions[0].rect, autoFig2.rect);
+    assert.deepEqual(mixedRes.regions[1].rect, adjustedRect);
+    assert.equal(mixedRes.unresolvedOverrides.length, 2);
+
+    // Case 3: New detector eventually detects same area as adjustedRect -> manual replace keeps priority without duplicate.
+    const autoMatchingAdjusted = serializeAutoRegions([
+      { rect: [72, 442, 314, 664], captionNumber: "1", sourceKinds: ["image"] },
+    ]);
+    const dedupRes = resolveEffectiveRegions(autoMatchingAdjusted, overrides);
+    assert.equal(dedupRes.regions.length, 1);
+    assert.deepEqual(dedupRes.regions[0].rect, adjustedRect);
+    assert.equal(dedupRes.regions[0].overrideId, repOvr.id);
+
+    // Case 4: Reset removes unmatched replace cleanly and leaves only pure auto output.
+    const resetRes = removeOverride(overrides, repOvr.id);
+    const restored = resolveEffectiveRegions(shiftedUnrelated, resetRes.overrides);
+    assert.equal(restored.regions.length, 1);
+    assert.deepEqual(restored.regions[0].rect, autoFig2.rect);
+    assert.equal(restored.regions[0].origin, "auto");
   });
 
   it("applies composite overrides (suppress + replace + add + reset) cleanly on one page", () => {
