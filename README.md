@@ -44,6 +44,7 @@ Zotero's built-in dark theme makes reading body text comfortable by inverting th
 
 - [At a Glance](#at-a-glance)
 - [Quick Start](#quick-start)
+- [Manual Region Adjustment](#manual-region-adjustment)
 - [Compatibility & Scope](#compatibility--scope)
 - [FAQ](#faq)
 - [Development & Documentation](#development--documentation)
@@ -53,8 +54,9 @@ Zotero's built-in dark theme makes reading body text comfortable by inverting th
 
 - **Caption-anchored paper detection**: Built specifically for **academic research papers** with explicit figure captions (`Figure` / `Fig.` or PDF `/Figure` tags), detecting vector paths and embedded graphics (Form / Image XObjects) and merging grid or row-aligned subfigure panels into a unified region.
 - **Selective color restoration**: Overlays original-color canvases on detected figure boxes while preserving Zotero's dark background for body text.
+- **Interactive manual adjustments**: Right-click on any PDF page to adjust figure boundaries via 4 corner handles, manually draw missing or uncaptioned regions, remove original-color protection on a figure, or reset back to automatic detection.
 - **Responsive to reading flow**: Automatically re-renders across scrolling, zooming, page turns, window resizing, and tab switches, prioritizing the active foreground tab and visible pages.
-- **Persistent per-attachment cache**: Caches detected figure regions and manual overrides under `<Zotero Data Directory>/figureguard/` so reopening a paper skips re-detection.
+- **Persistent per-attachment cache**: Caches detected figure regions and manual overrides under `<Zotero Data Directory>/figureguard/` so reopening a paper skips re-detection and retains your edits.
 - **One-click toolbar toggle**: Adds a toggle button (`Original` / `原色` depending on Zotero's UI language) in the PDF reader toolbar so you can pause or re-enable protection anytime.
 - **Built-in update support**: Configured with Zotero's add-on update manifest so future releases can be checked and updated directly inside Zotero.
 
@@ -73,10 +75,35 @@ Zotero's built-in dark theme makes reading body text comfortable by inverting th
 
 - Open any PDF in Zotero under the dark theme: figures on visible pages are automatically restored to their original colors.
 - Click the **`Original`** (or **`原色`** in Chinese Zotero UI) toggle in the PDF reader toolbar whenever you want to temporarily switch back to the unfiltered dark view.
+- If an auto-detected box is slightly off or misses a figure, right-click on the page while **`Original`** mode is active to manually adjust, add, remove, or reset regions (see [Manual Region Adjustment](#manual-region-adjustment)).
+
+<p align="center">
+  <img src="./assets/swith_on.gif" alt="Clicking the Original toggle in Zotero's toolbar restores original figure colors while keeping body text dark" />
+</p>
 
 ### 3. Updates
 
 Once installed, future updates can be fetched directly inside Zotero via **Tools → Add-ons → gear icon → Check for Updates**.
+
+## Manual Region Adjustment
+
+When automatic detection slightly crops a label, misses an uncaptioned graphic, or covers an area you prefer to keep dark, you can override figure regions directly inside Zotero's PDF reader:
+
+> Ensure the toolbar **`Original`** toggle is enabled—Figure Guard appends its entries below Zotero's native context-menu items without altering Zotero's own options.
+
+| Goal | Right-click location & menu item | How it works |
+| --- | --- | --- |
+| **Resize an existing box** | Right-click inside an active original-color region → **`Adjust Original Color Region…`** | Drag any of the 4 corner handles to refine the bounding box, then click **`Confirm`**. |
+| **Add a missed or uncaptioned area** | Right-click anywhere on a page → **`Add Original Color Region…`** | Click and drag across the page to draw a rectangle, adjust the 4 corner handles if needed, and click **`Confirm`**. |
+| **Revert a single figure to dark mode** | Right-click inside an active region → **`Remove Original Color Protection`** | Immediately hides original-color restoration for that figure only so it returns to Zotero's dark rendering. |
+| **Restore automatic detection** | Right-click a manually edited region (or a previously removed auto-detected area) → **`Reset to Automatic Region`** | Removes the manual override on that target—restoring the algorithm's box for detected figures, or deleting a standalone manual addition. |
+
+- **Cancelling uncommitted edits**: Click **`Cancel`** or press **`Esc`** (`Escape`) at any time before confirming to discard in-progress changes cleanly.
+- **Persistent per paper**: Confirmed adjustments, additions, removals, and resets are saved per attachment under `<Zotero Data Directory>/figureguard/cache/`, preserving your edits across restarts and future detector updates without touching the PDF file.
+
+<p align="center">
+  <img src="./assets/manual_adjustment.gif" alt="Demo of manual region adjustment via right-click menu, 4-corner handles, Confirm/Cancel bar, and Reset to Automatic Region" />
+</p>
 
 ## Compatibility & Scope
 
@@ -87,7 +114,7 @@ Once installed, future updates can be fetched directly inside Zotero via **Tools
 <details>
 <summary>Known boundaries (click to expand)</summary>
 
-- Uncaptioned figures, purely scanned bitmap PDFs, or unusual shading/masking pipelines are not covered (to maintain zero prose/table false positives in scholarly papers, uncaptioned graphics are intentionally skipped by the caption gate).
+- Uncaptioned figures, purely scanned bitmap PDFs, or unusual shading/masking pipelines are not covered by automatic detection (to maintain zero prose/table false positives in scholarly papers, uncaptioned graphics are intentionally skipped by the caption gate; you can still restore them anytime via right-click **`Add Original Color Region…`**).
 - Extreme edge-case layouts (such as pure-code figures or tightly mixed table/figure regions without clear caption separation) may occasionally be skipped or cropped imperfectly.
 - The extension is in `0.x` active iteration; see [docs/KNOWN_ISSUES.md](./docs/KNOWN_ISSUES.md) for tracked items and verification status.
 
