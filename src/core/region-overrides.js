@@ -302,11 +302,22 @@ function normalizeTargetDescriptor(target, autoRegions) {
   };
 }
 
-function sameOverrideTarget(existing, candidate) {
-  if (!existing || existing.op === "add") return false;
-  if (existing.targetRegionId && candidate.targetRegionId && existing.targetRegionId === candidate.targetRegionId) {
-    return true;
+function sameOverrideTarget(existing, candidate, autoRegions = []) {
+  if (!existing || !candidate || existing.op === "add" || candidate.op === "add") return false;
+  const auto = Array.isArray(autoRegions) && autoRegions.length ? autoRegions : [];
+
+  if (auto.length) {
+    const idxExisting = matchOverrideTarget(existing, auto);
+    const idxCandidate = matchOverrideTarget(candidate, auto);
+    if (idxExisting !== -1 || idxCandidate !== -1) {
+      return idxExisting !== -1 && idxExisting === idxCandidate;
+    }
   }
+
+  if (existing.targetRegionId && candidate.targetRegionId) {
+    return existing.targetRegionId === candidate.targetRegionId;
+  }
+
   if (existing.targetOriginalRect && candidate.targetOriginalRect) {
     if (
       existing.targetCaptionNumber !== null &&
@@ -391,11 +402,58 @@ function findSupersededAutoRegionForAdd(addOverride, autoRegions) {
 
 function entryTargetsSameAutoFigure(entry, auto, { autoIndex = -1, reference = null } = {}) {
   if (!entry || entry.op === "add") return false;
-  if (reference && sameOverrideTarget(entry, reference)) return true;
   if (autoIndex !== -1 && Array.isArray(auto) && auto.length) {
     return matchOverrideTarget(entry, auto) === autoIndex;
   }
+  if (reference) {
+    return sameOverrideTarget(entry, reference, auto);
+  }
   return false;
+}
+
+function removeManualAddOverride(list, removeIndex, auto, ts) {
+  const beforeEff = resolveEffectiveRegions(auto, list);
+  const beforeAutoIds = new Set(
+    beforeEff.regions.filter((r) => r.origin === "auto").map((r) => r.id),
+  );
+  const [removedAdd] = list.splice(removeIndex, 1);
+
+  if (removedAdd.allowDuplicate === true || !auto.length) {
+    return { ok: true, action: "removed-add", override: removedAdd, overrides: list };
+  }
+
+  const afterEff = resolveEffectiveRegions(auto, list);
+  const newlyExposed = afterEff.regions.filter(
+    (r) => r.origin === "auto" && !beforeAutoIds.has(r.id),
+  );
+  if (!newlyExposed.length) {
+    return { ok: true, action: "removed-add", override: removedAdd, overrides: list };
+  }
+
+  const superseded = findSupersededAutoRegionForAdd(removedAdd, newlyExposed);
+  if (!superseded) {
+    return { ok: true, action: "removed-add", override: removedAdd, overrides: list };
+  }
+
+  const desc = {
+    targetRegionId: superseded.region.id,
+    targetCaptionNumber: superseded.region.captionNumber,
+    targetOriginalRect: [...superseded.region.rect],
+  };
+  const created = normalizeOverrideEntry({
+    id: mintOverrideId(),
+    op: "suppress",
+    ...desc,
+    createdAt: ts,
+    updatedAt: ts,
+  });
+  return {
+    ok: true,
+    action: "suppress",
+    override: created,
+    removedAdd,
+    overrides: [...list, created],
+  };
 }
 
 function applyAutoSuppress(list, auto, autoIndex, descriptor, ts, extra = {}) {
@@ -415,9 +473,9 @@ function applyAutoSuppress(list, auto, autoIndex, descriptor, ts, extra = {}) {
 
 /**
  * Purely inserts or updates a `suppress` override for a page's override list.
- * When removing a manual `"add"` override that superseded a matching auto region,
- * promotes that removal into a `suppress` override for that auto region so
- * Remove keeps Effective Regions suppressed instead of re-exposing the auto box.
+ * When removing a manual `"add"` override, promotes the removal into a `suppress`
+ * override only if deleting that addition actually re-exposes an auto region it
+ * deduplicated (leaving any existing `replace`, `suppress`, or other `add` intact).
  */
 export function upsertSuppressOverride(overrides, target, { autoRegions = [], now } = {}) {
   const list = Array.isArray(overrides)
@@ -430,17 +488,7 @@ export function upsertSuppressOverride(overrides, target, { autoRegions = [], no
   if (explicitIdx !== -1) {
     const existing = list[explicitIdx];
     if (existing.op === "add") {
-      const [removedAdd] = list.splice(explicitIdx, 1);
-      const superseded = findSupersededAutoRegionForAdd(removedAdd, auto);
-      if (!superseded) {
-        return { ok: true, action: "removed-add", override: removedAdd, overrides: list };
-      }
-      const desc = {
-        targetRegionId: superseded.region.id,
-        targetCaptionNumber: superseded.region.captionNumber,
-        targetOriginalRect: [...superseded.region.rect],
-      };
-      return applyAutoSuppress(list, auto, superseded.index, desc, ts, { removedAdd });
+      return removeManualAddOverride(list, explicitIdx, auto, ts);
     }
 
     list.splice(explicitIdx, 1);
@@ -464,21 +512,13 @@ export function upsertSuppressOverride(overrides, target, { autoRegions = [], no
   if (matchedAuto === -1) {
     const manualIdx = findMatchingManualOverrideIndex(list, target, { ops: ["add", "replace"] });
     if (manualIdx !== -1) {
-      const [removed] = list.splice(manualIdx, 1);
-      if (removed.op === "add") {
-        const superseded = findSupersededAutoRegionForAdd(removed, auto);
-        if (superseded) {
-          const desc = {
-            targetRegionId: superseded.region.id,
-            targetCaptionNumber: superseded.region.captionNumber,
-            targetOriginalRect: [...superseded.region.rect],
-          };
-          return applyAutoSuppress(list, auto, superseded.index, desc, ts, { removedAdd: removed });
-        }
+      if (list[manualIdx].op === "add") {
+        return removeManualAddOverride(list, manualIdx, auto, ts);
       }
+      const [removed] = list.splice(manualIdx, 1);
       return {
         ok: true,
-        action: removed.op === "add" ? "removed-add" : "removed-replace",
+        action: "removed-replace",
         override: removed,
         overrides: list,
       };
@@ -646,22 +686,20 @@ export function removeOverride(overrides, overrideIdOrTarget, { autoRegions = []
   if (targetId) {
     const byId = list.filter((entry) => entry.id === targetId);
     if (byId.length) {
-      const autoIndices = new Set();
-      for (const entry of byId) {
-        if (entry.op !== "add" && auto.length) {
-          const idx = matchOverrideTarget(entry, auto);
-          if (idx !== -1) autoIndices.add(idx);
-        }
-      }
       remaining = [];
       for (const entry of list) {
         if (entry.id === targetId) {
           removed.push(entry);
           continue;
         }
-        const dupByAuto = entry.op !== "add" && auto.length && autoIndices.has(matchOverrideTarget(entry, auto));
-        const dupByRef = entry.op !== "add" && byId.some((ref) => ref.op !== "add" && sameOverrideTarget(entry, ref));
-        if (dupByAuto || dupByRef) {
+        const isDup =
+          entry.op !== "add" &&
+          byId.some((ref) => {
+            if (ref.op === "add") return false;
+            const refAutoIdx = auto.length ? matchOverrideTarget(ref, auto) : -1;
+            return entryTargetsSameAutoFigure(entry, auto, { autoIndex: refAutoIdx, reference: ref });
+          });
+        if (isDup) {
           removed.push(entry);
         } else {
           remaining.push(entry);

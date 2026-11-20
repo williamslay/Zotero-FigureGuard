@@ -549,3 +549,197 @@ describe("region-overrides: P1 #2 single replace override identity across detect
     assert.deepEqual(effClean.regions[0].rect, autoA2[0].rect);
   });
 });
+
+describe("region-overrides: Issue 1 - removing manual-add must not affect existing Replace, Suppress, or sibling Add", () => {
+  const autoA = serializeAutoRegions([{ id: "A", rect: [100, 200, 400, 500], captionNumber: "1", sourceKinds: ["image"] }]);
+
+  it("Case A: Auto A + Replace R + Add M -> Remove M keeps R and does not create suppress", () => {
+    const rep = upsertReplaceOverride([], autoA[0], [50, 150, 450, 550], { autoRegions: autoA });
+    const added = appendAddOverride(rep.overrides, [100, 200, 400, 500], { allowDuplicate: false });
+    const effBefore = resolveEffectiveRegions(autoA, added.overrides);
+    assert.equal(effBefore.regions.length, 2);
+    const regionM = effBefore.regions.find((r) => r.origin === "manual-add");
+    assert.ok(regionM);
+
+    const removed = upsertSuppressOverride(added.overrides, regionM, { autoRegions: autoA });
+    assert.equal(removed.ok, true);
+    assert.equal(removed.overrides.length, 1);
+    assert.equal(removed.overrides[0].op, "replace");
+    assert.equal(removed.overrides[0].id, rep.override.id);
+
+    const effAfter = resolveEffectiveRegions(autoA, removed.overrides);
+    assert.equal(effAfter.regions.length, 1);
+    assert.equal(effAfter.regions[0].overrideId, rep.override.id);
+    assert.deepEqual(effAfter.regions[0].rect, [50, 150, 450, 550]);
+  });
+
+  it("Case B: Auto A + Add M (M supersedes A) -> Remove M suppresses A so Effective = []", () => {
+    const added = appendAddOverride([], [100, 200, 400, 500]);
+    const effBefore = resolveEffectiveRegions(autoA, added.overrides);
+    assert.equal(effBefore.regions.length, 1);
+    assert.equal(effBefore.regions[0].origin, "manual-add");
+
+    const removed = upsertSuppressOverride(added.overrides, effBefore.regions[0], { autoRegions: autoA });
+    assert.equal(removed.overrides.length, 1);
+    assert.equal(removed.overrides[0].op, "suppress");
+    assert.equal(removed.overrides[0].targetRegionId, "A");
+    assert.deepEqual(resolveEffectiveRegions(autoA, removed.overrides).regions, []);
+  });
+
+  it("Case C: Auto A + Add M -> Reset M restores A", () => {
+    const added = appendAddOverride([], [100, 200, 400, 500]);
+    const effBefore = resolveEffectiveRegions(autoA, added.overrides);
+    const reset = removeOverride(added.overrides, effBefore.regions[0], { autoRegions: autoA });
+    assert.equal(reset.overrides.length, 0);
+    const effAfter = resolveEffectiveRegions(autoA, reset.overrides);
+    assert.equal(effAfter.regions.length, 1);
+    assert.equal(effAfter.regions[0].origin, "auto");
+    assert.equal(effAfter.regions[0].id, "A");
+  });
+
+  it("Case D: Auto A + Add M1 + Add M2 -> Remove M1 keeps M2 untouched and does not emit suppress", () => {
+    const add1 = appendAddOverride([], [100, 200, 400, 500], { allowDuplicate: true });
+    const add2 = appendAddOverride(add1.overrides, [100, 200, 400, 500], { allowDuplicate: true });
+    // Even if add2 is normal (non-allowDuplicate), M2 alone still deduplicates A when M1 is removed.
+    const overrides = [
+      normalizeOverrideEntry({ ...add1.override, allowDuplicate: false }),
+      normalizeOverrideEntry({ ...add2.override, allowDuplicate: false }),
+    ];
+    const effBefore = resolveEffectiveRegions(autoA, overrides);
+    assert.equal(effBefore.regions.length, 2);
+
+    const removed = upsertSuppressOverride(overrides, overrides[0].id, { autoRegions: autoA });
+    assert.equal(removed.overrides.length, 1);
+    assert.equal(removed.overrides[0].id, overrides[1].id);
+    const effAfter = resolveEffectiveRegions(autoA, removed.overrides);
+    assert.equal(effAfter.regions.length, 1);
+    assert.equal(effAfter.regions[0].overrideId, overrides[1].id);
+  });
+
+  it("Case E: Auto A + suppress A + Add M -> Remove M keeps existing suppress A unchanged", () => {
+    const sup = upsertSuppressOverride([], autoA[0], { autoRegions: autoA });
+    const existingSupId = sup.override.id;
+    const added = appendAddOverride(sup.overrides, [100, 200, 400, 500]);
+    const effBefore = resolveEffectiveRegions(autoA, added.overrides);
+    assert.equal(effBefore.regions.length, 1);
+
+    const removed = upsertSuppressOverride(added.overrides, effBefore.regions[0], { autoRegions: autoA });
+    assert.equal(removed.overrides.length, 1);
+    assert.equal(removed.overrides[0].op, "suppress");
+    assert.equal(removed.overrides[0].id, existingSupId);
+    assert.deepEqual(resolveEffectiveRegions(autoA, removed.overrides).regions, []);
+  });
+});
+
+describe("region-overrides: Issue 2 - distinct Region IDs stay isolated despite IoU > 0.95", () => {
+  const autoTwo = serializeAutoRegions([
+    { id: "A", rect: [100, 200, 400, 500], captionNumber: "1", sourceKinds: ["image"] },
+    { id: "B", rect: [102, 202, 398, 498], captionNumber: "1", sourceKinds: ["image"] },
+  ]);
+
+  function makePairOverrides() {
+    const r1 = normalizeOverrideEntry({
+      id: "ovr-r1",
+      op: "replace",
+      targetRegionId: "A",
+      targetCaptionNumber: "1",
+      targetOriginalRect: [100, 200, 400, 500],
+      rect: [90, 190, 410, 510],
+    });
+    const r2 = normalizeOverrideEntry({
+      id: "ovr-r2",
+      op: "replace",
+      targetRegionId: "B",
+      targetCaptionNumber: "1",
+      targetOriginalRect: [102, 202, 398, 498],
+      rect: [110, 210, 390, 490],
+    });
+    return [r1, r2];
+  }
+
+  it("Case A: Reset R1 keeps independent R2 when A and B have distinct IDs and IoU ~0.974", () => {
+    const overrides = makePairOverrides();
+    const res = removeOverride(overrides, "ovr-r1", { autoRegions: autoTwo });
+    assert.equal(res.overrides.length, 1);
+    assert.equal(res.overrides[0].id, "ovr-r2");
+    assert.equal(res.overrides[0].targetRegionId, "B");
+  });
+
+  it("Case B: Replace R1 updates only R1 and keeps R2 unchanged (with or without overrideId)", () => {
+    const overrides = makePairOverrides();
+    const eff = resolveEffectiveRegions(autoTwo, overrides);
+    const regionA = eff.regions.find((r) => r.overrideId === "ovr-r1");
+    assert.ok(regionA);
+
+    const updatedByOverrideId = upsertReplaceOverride(overrides, regionA, [80, 180, 420, 520], { autoRegions: autoTwo });
+    assert.equal(updatedByOverrideId.overrides.length, 2);
+    assert.equal(updatedByOverrideId.overrides.find((o) => o.id === "ovr-r2")?.targetRegionId, "B");
+    assert.deepEqual(updatedByOverrideId.overrides.find((o) => o.id === "ovr-r2")?.rect, [110, 210, 390, 490]);
+
+    const updatedByAutoTarget = upsertReplaceOverride(overrides, autoTwo[0], [75, 175, 425, 525], {
+      autoRegions: autoTwo,
+    });
+    assert.equal(updatedByAutoTarget.overrides.length, 2);
+    assert.equal(updatedByAutoTarget.overrides.find((o) => o.id === "ovr-r1")?.rect[0], 75);
+    assert.deepEqual(updatedByAutoTarget.overrides.find((o) => o.id === "ovr-r2")?.rect, [110, 210, 390, 490]);
+  });
+
+  it("Case C: Suppress A preserves R2 and leaves B's manual region effective", () => {
+    const overrides = makePairOverrides();
+    const sup = upsertSuppressOverride(overrides, autoTwo[0], { autoRegions: autoTwo });
+    assert.equal(sup.overrides.length, 2);
+    assert.ok(sup.overrides.some((o) => o.op === "suppress" && o.targetRegionId === "A"));
+    assert.ok(sup.overrides.some((o) => o.op === "replace" && o.id === "ovr-r2"));
+
+    const eff = resolveEffectiveRegions(autoTwo, sup.overrides);
+    assert.equal(eff.regions.length, 1);
+    assert.equal(eff.regions[0].overrideId, "ovr-r2");
+    assert.deepEqual(eff.regions[0].rect, [110, 210, 390, 490]);
+  });
+
+  it("Case D: cleans up legacy duplicate R1+R2 that both map to upgraded Auto A on Reset", () => {
+    const autoAUpgraded = serializeAutoRegions([
+      { id: "A-v2", rect: [130, 200, 430, 500], captionNumber: "1", sourceKinds: ["image"] },
+    ]);
+    const legacyR1 = normalizeOverrideEntry({
+      id: "ovr-old-1",
+      op: "replace",
+      targetRegionId: "A-v1",
+      targetCaptionNumber: "1",
+      targetOriginalRect: [100, 200, 400, 500],
+      rect: [95, 195, 410, 510],
+    });
+    const legacyR2 = normalizeOverrideEntry({
+      id: "ovr-new-2",
+      op: "replace",
+      targetRegionId: "A-v2",
+      targetCaptionNumber: "1",
+      targetOriginalRect: [130, 200, 430, 500],
+      rect: [85, 185, 440, 530],
+    });
+    const res = removeOverride([legacyR1, legacyR2], "ovr-new-2", { autoRegions: autoAUpgraded });
+    assert.equal(res.overrides.length, 0);
+    const eff = resolveEffectiveRegions(autoAUpgraded, res.overrides);
+    assert.equal(eff.regions.length, 1);
+    assert.equal(eff.regions[0].id, "A-v2");
+    assert.equal(eff.regions[0].origin, "auto");
+  });
+
+  it("Case E: Auto A1->A2 where A1 id no longer exists reuses original overrideId without duplicating Replace", () => {
+    const a1 = serializeAutoRegions([{ id: "A1", rect: [100, 200, 400, 500], captionNumber: "1" }]);
+    const a2 = serializeAutoRegions([{ id: "A2", rect: [145, 200, 445, 500], captionNumber: "1" }]);
+    const first = upsertReplaceOverride([], a1[0], [92, 192, 412, 512], { autoRegions: a1 });
+    const origId = first.override.id;
+
+    const effUpgrade = resolveEffectiveRegions(a2, first.overrides);
+    assert.equal(effUpgrade.regions[0].overrideId, origId);
+
+    const second = upsertReplaceOverride(first.overrides, effUpgrade.regions[0], [88, 188, 430, 520], {
+      autoRegions: a2,
+    });
+    assert.equal(second.overrides.length, 1);
+    assert.equal(second.override.id, origId);
+    assert.equal(second.override.targetRegionId, "A1");
+    assert.deepEqual(second.override.rect, [88, 188, 430, 520]);
+  });
+});
