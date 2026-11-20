@@ -15,12 +15,14 @@ src/
     captions.js              Caption-to-figure pairing
     placements.js            XObjects, inline/mask images, shading, clip paths, and path mapping
     cache.js                 Document-scoped region cache keyed by item + document fingerprint
+    region-overrides.js      Pure cache/override versions, bbox validation, and resolveEffectiveRegions
     pdf-source.js            Document fingerprint and document-level extraction
     render.js / viewport.js / geom.js
   zotero/                    Zotero integration layer
     main.js                  startup/shutdown, Notifier, localized toolbar toggle, FigureGuard API
     reader-session.js        Per-reader lifecycle, realm validation, foreground-first scheduling
-    overlay.js               Overlay canvas mounting, painting, geometry/connection checks
+    overlay.js               Overlay canvas mounting, cache-first detection, painting, geometry/connection checks
+    persistent-figure-store.js  Per-attachment persistent auto-cache & manual override JSON store
     realm-render.js          Rendering inside the reader's own realm
     paint-probe.js / xray.js / zoom.js
 scripts/
@@ -41,7 +43,7 @@ docs/                        Developer documentation (DEVELOPMENT / KNOWN_ISSUES
 ## Architecture Overview
 
 1. **Detection Layer** (`src/core/detector.js`): Pure functions taking pdf.js `getOperatorList()` output and returning figure bounding boxes for a page. Full-page borders, decorative rules, and text underlines are filtered by threshold rules, while equal-sized subfigure panels in grids or rows are merged into a unified region.
-2. **Cache Layer** (`src/core/cache.js`): Region sets are scoped by `item:<itemID>|<documentFingerprint>` so switching across tabs never leaks regions between documents.
+2. **Cache Layer** (`src/core/cache.js`, `src/core/region-overrides.js`, `src/zotero/persistent-figure-store.js`): Memory `RegionCache` sets are scoped by `item:<itemID>|<documentFingerprint>` so switching across tabs never leaks regions between documents; persisted per-attachment JSON under `<Zotero Data Directory>/figureguard/cache/item-<id>.json` stores `autoCache` separately from `manualOverrides` and reconciles them via `resolveEffectiveRegions`.
 3. **Integration Layer** (`src/zotero/`): Resolves and validates each reader session's own pdf.js realm, listens to document and page render events, and schedules detection and overlay painting foreground-first (prioritizing the active tab and visible `currentPageNumber`). Overlay canvases carry provenance stamps (`fcpRealm` / `fcpDoc`) to diagnose cross-tab misrouting or detached canvases.
 
 ## Building from Source
@@ -77,7 +79,7 @@ Tests are organized into two tiers.
 npm run test:ci
 ```
 
-Runs only the PDF-free test files (currently 18 files, 461 tests). All tests must execute and pass with `cancelled: 0`. This is the exact gate run by GitHub Actions CI.
+Runs only the PDF-free test files (currently 20 files, 496 tests). All tests must execute and pass with `cancelled: 0`. This is the exact gate run by GitHub Actions CI.
 
 ### Level 2 — Full Fixture Regression (requires local PDFs)
 
@@ -85,7 +87,7 @@ Runs only the PDF-free test files (currently 18 files, 461 tests). All tests mus
 npm test              # equivalent to npm run test:fixture
 ```
 
-Runs the full maintainer suite (currently 25 files, 543 tests). Detection baselines rely on five academic paper PDFs that are copyrighted and not redistributed in this repository. Place them locally at the following paths (the first four at the repository root, the last one under `fixture/`):
+Runs the full maintainer suite (currently 27 files, 578 tests). Detection baselines rely on five academic paper PDFs that are copyrighted and not redistributed in this repository. Place them locally at the following paths (the first four at the repository root, the last one under `fixture/`):
 
 ```text
 Borges_ A Low-Latency Distributed Shared Log on a CXL Memory_SSD Hybrid.pdf

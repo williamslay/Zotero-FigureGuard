@@ -18,6 +18,7 @@ export * from "./captions.js";
 export * from "./viewport.js";
 export * from "./render.js";
 export * from "./cache.js";
+export * from "./region-overrides.js";
 export { collectPageEvidence, MEASURED_OP_CODES, resolveRuntimeOPS } from "./pdf-source.js";
 
 /**

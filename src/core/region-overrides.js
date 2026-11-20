@@ -1,0 +1,671 @@
+/**
+ * Pure data structures, validation, target matching, and override resolution
+ * for persistent auto-detected figure caches and user manual overrides.
+ *
+ * Zero Zotero or browser-DOM dependencies: runs identically in Node tests and
+ * inside the Zotero chrome sandbox.
+ */
+
+import { coverageOf, iou, roundRect, toRect } from "./geom.js";
+
+/** Schema version for the per-attachment persistent JSON envelope. */
+export const PERSISTENT_SCHEMA_VERSION = 1;
+
+/**
+ * Independent auto-detection cache revision.
+ * Bump only when figure detection logic/heuristics change in a way that should
+ * invalidate previously cached auto-detected bounding boxes while preserving
+ * manual user overrides. Never couple to the add-on UI version.
+ */
+export const DETECTOR_CACHE_REVISION = 1;
+
+let overrideCounter = 0;
+
+/**
+ * Validates and copies a PDF user-space bounding box `[x0, y0, x1, y1]`.
+ * Requires finite coordinates with strictly positive width and height.
+ *
+ * @param {unknown} rect
+ * @returns {number[]|null}
+ */
+export function validateBBox(rect) {
+  const coerced = toRect(rect);
+  if (!coerced) return null;
+  const [x0, y0, x1, y1] = coerced;
+  if (!(x1 > x0 && y1 > y0)) return null;
+  return [x0, y0, x1, y1];
+}
+
+function normalizeCaptionNumber(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text ? text : null;
+}
+
+function normalizeSourceKinds(region) {
+  const raw = Array.isArray(region?.sourceKinds)
+    ? region.sourceKinds
+    : region?.kind
+      ? [region.kind]
+      : ["figure"];
+  const seen = new Set();
+  for (const item of raw) {
+    if (typeof item === "string" && item.trim()) seen.add(item.trim());
+  }
+  return seen.size ? [...seen] : ["figure"];
+}
+
+function nextTimestamp(now) {
+  if (typeof now === "function") return String(now());
+  if (typeof now === "string" && now) return now;
+  return new Date().toISOString();
+}
+
+function mintOverrideId() {
+  try {
+    if (typeof globalThis.crypto?.randomUUID === "function") {
+      return `ovr-${globalThis.crypto.randomUUID()}`;
+    }
+  } catch {
+    // Fall back to monotonic counter id.
+  }
+  overrideCounter += 1;
+  return `ovr-${Date.now().toString(36)}-${overrideCounter.toString(36)}`;
+}
+
+/**
+ * Computes a deterministic identifier for an auto-detected figure region using
+ * its caption label and quantized bounding box rather than array index alone.
+ *
+ * @param {object} region
+ * @param {number} [index]
+ * @returns {string}
+ */
+export function regionIdFor(region, index = 0) {
+  if (typeof region?.id === "string" && region.id.trim()) {
+    return region.id.trim();
+  }
+  const rect = validateBBox(region?.rect ?? region);
+  if (!rect) return `auto-${index}`;
+  const rounded = roundRect(rect, 2);
+  const cap = normalizeCaptionNumber(region?.captionNumber);
+  const capPart = cap !== null ? `cap-${cap}` : "nocap";
+  return `${capPart}:${rounded.join(",")}`;
+}
+
+/**
+ * Converts a detected figure region into a plain JSON-serializable auto-cache
+ * record. Returns `null` if the region lacks a valid positive-area bounding box.
+ *
+ * @param {object} region
+ * @param {number} [index]
+ * @returns {object|null}
+ */
+export function serializeAutoRegion(region, index = 0) {
+  if (!region || typeof region !== "object") return null;
+  const rect = validateBBox(region.rect);
+  if (!rect) return null;
+  const captionNumber = normalizeCaptionNumber(region.captionNumber);
+  const caption = typeof region.caption === "string" && region.caption.trim() ? region.caption : null;
+  const sourceKinds = normalizeSourceKinds(region);
+  const kind = typeof region.kind === "string" && region.kind.trim() ? region.kind.trim() : sourceKinds[0];
+  const conf = Number(region.confidence);
+  return {
+    id: regionIdFor({ ...region, rect, captionNumber }, index),
+    rect,
+    captionNumber,
+    caption,
+    sourceKinds,
+    kind,
+    confidence: Number.isFinite(conf) ? conf : null,
+  };
+}
+
+/**
+ * Normalizes an array of auto-detected regions and guarantees unique region IDs
+ * within a single page.
+ *
+ * @param {Array<object>|null|undefined} regions
+ * @returns {Array<object>}
+ */
+export function serializeAutoRegions(regions) {
+  if (!Array.isArray(regions)) return [];
+  const out = [];
+  const seenIds = new Map();
+  for (let i = 0; i < regions.length; i += 1) {
+    const serialized = serializeAutoRegion(regions[i], i);
+    if (!serialized) continue;
+    const baseId = serialized.id;
+    const count = seenIds.get(baseId) ?? 0;
+    seenIds.set(baseId, count + 1);
+    if (count > 0) {
+      serialized.id = `${baseId}#${count + 1}`;
+    }
+    out.push(serialized);
+  }
+  return out;
+}
+
+/**
+ * Validates and normalizes a stored manual override entry loaded from disk.
+ * Returns `null` if malformed so invalid records cannot corrupt resolution.
+ *
+ * @param {unknown} entry
+ * @returns {object|null}
+ */
+export function normalizeOverrideEntry(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const op = entry.op;
+  if (op !== "suppress" && op !== "replace" && op !== "add") return null;
+  const id = typeof entry.id === "string" && entry.id.trim() ? entry.id.trim() : mintOverrideId();
+  const createdAt = typeof entry.createdAt === "string" && entry.createdAt ? entry.createdAt : null;
+  const updatedAt = typeof entry.updatedAt === "string" && entry.updatedAt ? entry.updatedAt : createdAt;
+
+  if (op === "add") {
+    const rect = validateBBox(entry.rect);
+    if (!rect) return null;
+    const captionNumber = normalizeCaptionNumber(entry.captionNumber);
+    const caption = typeof entry.caption === "string" && entry.caption.trim() ? entry.caption : null;
+    const out = { id, op: "add", rect, captionNumber, caption };
+    if (entry.allowDuplicate === true) out.allowDuplicate = true;
+    if (createdAt) out.createdAt = createdAt;
+    if (updatedAt) out.updatedAt = updatedAt;
+    return out;
+  }
+
+  const targetRegionId =
+    typeof entry.targetRegionId === "string" && entry.targetRegionId.trim()
+      ? entry.targetRegionId.trim()
+      : null;
+  const targetCaptionNumber = normalizeCaptionNumber(entry.targetCaptionNumber);
+  const targetOriginalRect = entry.targetOriginalRect != null ? validateBBox(entry.targetOriginalRect) : null;
+  if (!targetRegionId && !targetOriginalRect) return null;
+
+  if (op === "replace") {
+    const rect = validateBBox(entry.rect);
+    if (!rect) return null;
+    const out = {
+      id,
+      op: "replace",
+      targetRegionId,
+      targetCaptionNumber,
+      targetOriginalRect,
+      rect,
+    };
+    if (createdAt) out.createdAt = createdAt;
+    if (updatedAt) out.updatedAt = updatedAt;
+    return out;
+  }
+
+  const out = {
+    id,
+    op: "suppress",
+    targetRegionId,
+    targetCaptionNumber,
+    targetOriginalRect,
+  };
+  if (createdAt) out.createdAt = createdAt;
+  if (updatedAt) out.updatedAt = updatedAt;
+  return out;
+}
+
+/**
+ * Finds the auto-detected region on a page targeted by a `suppress` or `replace`
+ * override. Matches by stable `targetRegionId` first, then by non-conflicting
+ * caption number + geometric overlap fallback, never blindly by array index.
+ *
+ * @param {object} override
+ * @param {Array<object>} autoRegions Normalized auto-region list.
+ * @returns {number} Matched index in `autoRegions`, or `-1` when unresolved.
+ */
+export function matchOverrideTarget(override, autoRegions) {
+  if (!override || !Array.isArray(autoRegions) || !autoRegions.length) return -1;
+
+  if (override.targetRegionId) {
+    const exactIndex = autoRegions.findIndex((region) => region.id === override.targetRegionId);
+    if (exactIndex !== -1) return exactIndex;
+  }
+
+  const targetRect = validateBBox(override.targetOriginalRect);
+  if (!targetRect) return -1;
+
+  const targetCap = normalizeCaptionNumber(override.targetCaptionNumber);
+  let bestIndex = -1;
+  let bestSameCap = -1;
+  let bestIou = 0;
+
+  for (let i = 0; i < autoRegions.length; i += 1) {
+    const candidate = autoRegions[i];
+    const candRect = validateBBox(candidate?.rect);
+    if (!candRect) continue;
+
+    const candCap = normalizeCaptionNumber(candidate?.captionNumber);
+    if (targetCap !== null && candCap !== null && targetCap !== candCap) {
+      continue;
+    }
+
+    const sameCap = targetCap !== null && candCap === targetCap;
+    const overlapIou = iou(targetRect, candRect);
+    const covTarget = coverageOf(targetRect, candRect);
+    const matches = sameCap
+      ? overlapIou >= 0.35 || (covTarget >= 0.65 && overlapIou >= 0.2)
+      : overlapIou >= 0.55;
+
+    if (!matches) continue;
+    const capScore = sameCap ? 1 : 0;
+    if (capScore > bestSameCap || (capScore === bestSameCap && overlapIou > bestIou)) {
+      bestIndex = i;
+      bestSameCap = capScore;
+      bestIou = overlapIou;
+    }
+  }
+
+  return bestIndex;
+}
+
+function normalizeTargetDescriptor(target, autoRegions) {
+  const auto = serializeAutoRegions(autoRegions);
+  let targetRegionId = null;
+  let targetCaptionNumber = null;
+  let targetOriginalRect = null;
+
+  if (typeof target === "string") {
+    const trimmed = target.trim();
+    if (trimmed) targetRegionId = trimmed;
+  } else if (Array.isArray(target) || ArrayBuffer.isView(target)) {
+    targetOriginalRect = validateBBox(target);
+  } else if (target && typeof target === "object") {
+    const rawId = target.targetRegionId ?? target.regionId ?? target.id ?? null;
+    if (typeof rawId === "string" && rawId.trim()) targetRegionId = rawId.trim();
+    targetCaptionNumber = normalizeCaptionNumber(target.targetCaptionNumber ?? target.captionNumber);
+    targetOriginalRect = validateBBox(target.targetOriginalRect ?? target.originalRect ?? target.rect);
+  }
+
+  if (auto.length && (targetRegionId || targetOriginalRect)) {
+    const matchedIdx = matchOverrideTarget(
+      { targetRegionId, targetCaptionNumber, targetOriginalRect },
+      auto,
+    );
+    if (matchedIdx !== -1) {
+      const matched = auto[matchedIdx];
+      targetRegionId ??= matched.id;
+      targetCaptionNumber ??= matched.captionNumber;
+      targetOriginalRect ??= [...matched.rect];
+    }
+  }
+
+  if (!targetRegionId && !targetOriginalRect) return null;
+  return {
+    targetRegionId,
+    targetCaptionNumber,
+    targetOriginalRect,
+  };
+}
+
+function sameOverrideTarget(existing, candidate) {
+  if (!existing || existing.op === "add") return false;
+  if (existing.targetRegionId && candidate.targetRegionId && existing.targetRegionId === candidate.targetRegionId) {
+    return true;
+  }
+  if (existing.targetOriginalRect && candidate.targetOriginalRect) {
+    if (
+      existing.targetCaptionNumber !== null &&
+      candidate.targetCaptionNumber !== null &&
+      existing.targetCaptionNumber !== candidate.targetCaptionNumber
+    ) {
+      return false;
+    }
+    if (iou(existing.targetOriginalRect, candidate.targetOriginalRect) >= 0.85) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function findMatchingAddOverrideIndex(overrides, target) {
+  if (!Array.isArray(overrides) || !overrides.length || target == null) return -1;
+  if (typeof target === "string") {
+    const id = target.trim();
+    return overrides.findIndex((o) => o.op === "add" && o.id === id);
+  }
+  if (target && typeof target === "object" && !Array.isArray(target)) {
+    const id = target.overrideId ?? target.id ?? null;
+    if (typeof id === "string" && id.trim()) {
+      const idx = overrides.findIndex((o) => o.op === "add" && o.id === id.trim());
+      if (idx !== -1) return idx;
+    }
+  }
+  const rect = Array.isArray(target) ? validateBBox(target) : validateBBox(target?.rect);
+  if (rect) {
+    return overrides.findIndex((o) => o.op === "add" && iou(o.rect, rect) >= 0.95);
+  }
+  return -1;
+}
+
+/**
+ * Purely inserts or updates a `suppress` override for a page's override list.
+ * If `target` identifies an existing manual `"add"` override directly (and not
+ * an auto region), removes that manual addition cleanly.
+ */
+export function upsertSuppressOverride(overrides, target, { autoRegions = [], now } = {}) {
+  const list = Array.isArray(overrides)
+    ? overrides.map(normalizeOverrideEntry).filter(Boolean)
+    : [];
+  const auto = serializeAutoRegions(autoRegions);
+  const descriptor = normalizeTargetDescriptor(target, auto);
+  const ts = nextTimestamp(now);
+
+  const matchedAuto = descriptor ? matchOverrideTarget(descriptor, auto) : -1;
+  if (matchedAuto === -1) {
+    const addIdx = findMatchingAddOverrideIndex(list, target);
+    if (addIdx !== -1) {
+      const [removed] = list.splice(addIdx, 1);
+      return { ok: true, action: "removed-add", override: removed, overrides: list };
+    }
+  }
+
+  if (!descriptor) {
+    return { ok: false, reason: "invalid-target", overrides: list };
+  }
+
+  const next = list.filter((entry) => !sameOverrideTarget(entry, descriptor));
+  const created = normalizeOverrideEntry({
+    id: mintOverrideId(),
+    op: "suppress",
+    ...descriptor,
+    createdAt: ts,
+    updatedAt: ts,
+  });
+  next.push(created);
+  return { ok: true, action: "suppress", override: created, overrides: next };
+}
+
+/**
+ * Purely inserts or updates a `replace` override for a page's override list.
+ * If `target` names an existing manual `"add"` override, updates that addition's
+ * bounding box in place.
+ */
+export function upsertReplaceOverride(overrides, target, newRect, { autoRegions = [], now } = {}) {
+  const list = Array.isArray(overrides)
+    ? overrides.map(normalizeOverrideEntry).filter(Boolean)
+    : [];
+  const validRect = validateBBox(newRect);
+  if (!validRect) {
+    return { ok: false, reason: "invalid-rect", overrides: list };
+  }
+
+  const auto = serializeAutoRegions(autoRegions);
+  const descriptor = normalizeTargetDescriptor(target, auto);
+  const ts = nextTimestamp(now);
+
+  const matchedAuto = descriptor ? matchOverrideTarget(descriptor, auto) : -1;
+  if (matchedAuto === -1) {
+    const addIdx = findMatchingAddOverrideIndex(list, target);
+    if (addIdx !== -1) {
+      const updated = {
+        ...list[addIdx],
+        rect: validRect,
+        updatedAt: ts,
+      };
+      list[addIdx] = updated;
+      return { ok: true, action: "update-add", override: updated, overrides: list };
+    }
+  }
+
+  if (!descriptor) {
+    return { ok: false, reason: "invalid-target", overrides: list };
+  }
+
+  const prior = list.find((entry) => sameOverrideTarget(entry, descriptor));
+  const next = list.filter((entry) => !sameOverrideTarget(entry, descriptor));
+  const created = normalizeOverrideEntry({
+    id: prior?.op === "replace" ? prior.id : mintOverrideId(),
+    op: "replace",
+    ...descriptor,
+    rect: validRect,
+    createdAt: prior?.createdAt ?? ts,
+    updatedAt: ts,
+  });
+  next.push(created);
+  return { ok: true, action: "replace", override: created, overrides: next };
+}
+
+/**
+ * Purely appends a manual `"add"` override to a page's override list, avoiding
+ * duplicate additions at the exact same coordinates unless `allowDuplicate` is set.
+ */
+export function appendAddOverride(
+  overrides,
+  rect,
+  { captionNumber = null, caption = null, allowDuplicate = false, now } = {},
+) {
+  const list = Array.isArray(overrides)
+    ? overrides.map(normalizeOverrideEntry).filter(Boolean)
+    : [];
+  const validRect = validateBBox(rect);
+  if (!validRect) {
+    return { ok: false, reason: "invalid-rect", overrides: list };
+  }
+  const ts = nextTimestamp(now);
+
+  if (!allowDuplicate) {
+    const existingIdx = list.findIndex((o) => o.op === "add" && iou(o.rect, validRect) >= 0.9);
+    if (existingIdx !== -1) {
+      const updated = {
+        ...list[existingIdx],
+        rect: validRect,
+        captionNumber: normalizeCaptionNumber(captionNumber) ?? list[existingIdx].captionNumber,
+        caption: typeof caption === "string" && caption.trim() ? caption : list[existingIdx].caption,
+        updatedAt: ts,
+      };
+      list[existingIdx] = updated;
+      return { ok: true, action: "update-existing-add", override: updated, overrides: list };
+    }
+  }
+
+  const created = normalizeOverrideEntry({
+    id: mintOverrideId(),
+    op: "add",
+    rect: validRect,
+    captionNumber,
+    caption,
+    allowDuplicate,
+    createdAt: ts,
+    updatedAt: ts,
+  });
+  list.push(created);
+  return { ok: true, action: "add", override: created, overrides: list };
+}
+
+/**
+ * Purely removes one matching override (or all overrides when `all: true` or
+ * `overrideIdOrTarget === "*"`).
+ */
+export function removeOverride(overrides, overrideIdOrTarget, { autoRegions = [], all = false } = {}) {
+  const list = Array.isArray(overrides)
+    ? overrides.map(normalizeOverrideEntry).filter(Boolean)
+    : [];
+  if (all === true || overrideIdOrTarget === "*") {
+    return { ok: true, removed: list, removedCount: list.length, overrides: [] };
+  }
+
+  if (overrideIdOrTarget == null) {
+    return { ok: false, reason: "invalid-target", removed: [], removedCount: 0, overrides: list };
+  }
+
+  const removed = [];
+  let remaining = list;
+
+  const targetId =
+    typeof overrideIdOrTarget === "string"
+      ? overrideIdOrTarget.trim()
+      : typeof overrideIdOrTarget?.overrideId === "string"
+        ? overrideIdOrTarget.overrideId.trim()
+        : typeof overrideIdOrTarget?.id === "string"
+          ? overrideIdOrTarget.id.trim()
+          : null;
+
+  if (targetId) {
+    const byId = list.filter((entry) => entry.id === targetId);
+    if (byId.length) {
+      removed.push(...byId);
+      remaining = list.filter((entry) => entry.id !== targetId);
+      return { ok: true, removed, removedCount: removed.length, overrides: remaining };
+    }
+  }
+
+  const auto = serializeAutoRegions(autoRegions);
+  const descriptor = normalizeTargetDescriptor(overrideIdOrTarget, auto);
+  if (descriptor) {
+    remaining = [];
+    for (const entry of list) {
+      if (entry.op !== "add" && sameOverrideTarget(entry, descriptor)) {
+        removed.push(entry);
+      } else {
+        remaining.push(entry);
+      }
+    }
+  }
+
+  if (!removed.length && (Array.isArray(overrideIdOrTarget) || validateBBox(overrideIdOrTarget?.rect))) {
+    const rect = validateBBox(Array.isArray(overrideIdOrTarget) ? overrideIdOrTarget : overrideIdOrTarget.rect);
+    if (rect) {
+      remaining = [];
+      for (const entry of list) {
+        if (entry.op === "add" && iou(entry.rect, rect) >= 0.9) {
+          removed.push(entry);
+        } else {
+          remaining.push(entry);
+        }
+      }
+    }
+  }
+
+  return { ok: true, removed, removedCount: removed.length, overrides: remaining };
+}
+
+/**
+ * Pure merge of auto-detected page regions with persisted manual overrides.
+ * Never mutates either input array.
+ *
+ * Resolution rules:
+ *   1. Match `suppress` and `replace` entries against `autoRegions` using
+ *      stable region ID first, then caption/geometry fallback.
+ *   2. Unmatched targets remain in `unresolvedOverrides` without misapplying
+ *      to unrelated regions on the page.
+ *   3. Apply `suppress` (drop region) and `replace` (swap bounding box without
+ *      duplicating the original box).
+ *   4. Append valid `add` regions, skipping redundant boxes when a later
+ *      auto-detection already covers the same coordinates (`iou >= 0.85`).
+ *
+ * @param {Array<object>|null|undefined} autoRegions
+ * @param {Array<object>|null|undefined} overrides
+ * @returns {{
+ *   regions: Array<object>,
+ *   unresolvedOverrides: Array<object>,
+ *   matchedOverrideIds: string[],
+ *   suppressedRegionIds: string[],
+ *   replacedRegionIds: string[],
+ *   addedOverrideIds: string[],
+ *   dedupedAddIds: string[]
+ * }}
+ */
+export function resolveEffectiveRegions(autoRegions, overrides) {
+  const normalizedAuto = serializeAutoRegions(autoRegions).map((region) => ({
+    ...region,
+    origin: "auto",
+  }));
+  const normalizedOverrides = Array.isArray(overrides)
+    ? overrides.map(normalizeOverrideEntry).filter(Boolean)
+    : [];
+
+  const states = new Map();
+  const unresolvedOverrides = [];
+  const matchedOverrideIds = [];
+  const addOverrides = [];
+
+  for (const override of normalizedOverrides) {
+    if (override.op === "add") {
+      addOverrides.push(override);
+      continue;
+    }
+    const targetIdx = matchOverrideTarget(override, normalizedAuto);
+    if (targetIdx === -1) {
+      unresolvedOverrides.push({ ...override });
+      continue;
+    }
+    matchedOverrideIds.push(override.id);
+    if (override.op === "suppress") {
+      states.set(targetIdx, { op: "suppress", override });
+    } else if (override.op === "replace") {
+      states.set(targetIdx, { op: "replace", override, rect: [...override.rect] });
+    }
+  }
+
+  const regions = [];
+  const suppressedRegionIds = [];
+  const replacedRegionIds = [];
+
+  for (let i = 0; i < normalizedAuto.length; i += 1) {
+    const base = normalizedAuto[i];
+    const state = states.get(i);
+    if (state?.op === "suppress") {
+      suppressedRegionIds.push(base.id);
+      continue;
+    }
+    if (state?.op === "replace") {
+      replacedRegionIds.push(base.id);
+      const sourceKinds = base.sourceKinds.includes("manual")
+        ? [...base.sourceKinds]
+        : [...base.sourceKinds, "manual"];
+      regions.push({
+        ...base,
+        rect: [...state.rect],
+        originalRect: [...base.rect],
+        origin: "manual-replace",
+        overrideId: state.override.id,
+        sourceKinds,
+      });
+      continue;
+    }
+    regions.push({
+      ...base,
+      rect: [...base.rect],
+      sourceKinds: [...base.sourceKinds],
+    });
+  }
+
+  const addedOverrideIds = [];
+  const dedupedAddIds = [];
+  for (const add of addOverrides) {
+    const duplicate =
+      add.allowDuplicate !== true &&
+      regions.some((existing) => iou(existing.rect, add.rect) >= 0.85);
+    if (duplicate) {
+      dedupedAddIds.push(add.id);
+      continue;
+    }
+    addedOverrideIds.push(add.id);
+    regions.push({
+      id: add.id,
+      overrideId: add.id,
+      rect: [...add.rect],
+      captionNumber: add.captionNumber ?? null,
+      caption: add.caption ?? null,
+      kind: "manual",
+      sourceKinds: ["manual"],
+      confidence: 1,
+      origin: "manual-add",
+    });
+  }
+
+  return {
+    regions,
+    unresolvedOverrides,
+    matchedOverrideIds,
+    suppressedRegionIds,
+    replacedRegionIds,
+    addedOverrideIds,
+    dedupedAddIds,
+  };
+}

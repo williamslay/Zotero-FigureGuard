@@ -22,6 +22,7 @@
  */
 
 import { PageOverlay, isProvisionalDocumentId, resolveDocumentId, warnOnce } from "./overlay.js";
+import { resolveAttachmentIdentity } from "./persistent-figure-store.js";
 import { createZoomWatcher } from "./zoom.js";
 import { scopedDocumentId } from "../core/cache.js";
 
@@ -624,12 +625,25 @@ export class ReaderSession {
    * @param {object} input
    * @param {object} input.reader A Zotero reader instance.
    * @param {object} input.regionCache The shared `RegionCache`.
+   * @param {object|null} [input.persistentStore] Optional persistent figure store.
+   * @param {(() => Promise<object|null>)|null} [input.resolveAttachmentMeta] Optional file stat resolver.
    * @param {string} [input.tag] Short reader label used in warnings.
    * @param {boolean} [input.enabled] Auto mode, on by default.
    */
-  constructor({ reader, regionCache, tag = "", enabled = true }) {
+  constructor({
+    reader,
+    regionCache,
+    persistentStore = null,
+    resolveAttachmentMeta = null,
+    tag = "",
+    enabled = true,
+  }) {
     this.reader = reader;
     this.regionCache = regionCache;
+    this.persistentStore = persistentStore ?? null;
+    this.resolveAttachmentMeta = typeof resolveAttachmentMeta === "function" ? resolveAttachmentMeta : null;
+    /** @type {Map<string, Promise<object|null>>} Per-document identity lookup cache. */
+    this.identityPromises = new Map();
     this.tag = tag;
     this.enabled = Boolean(enabled);
     /** @type {Map<number, PageOverlay>} Page number to overlay group. */
@@ -1225,6 +1239,7 @@ export class ReaderSession {
     if (this.destroyed || !freshId || freshId === this.documentId) return;
     const staleKey = this.cacheKey();
     this.documentId = freshId;
+    this.identityPromises.clear();
     this.regionCache.invalidateDocument(staleKey);
     this.lastStaleKey = staleKey;
     this.detachAll();
@@ -1428,6 +1443,53 @@ export class ReaderSession {
    */
   cacheKey() {
     return scopedDocumentId(this.cacheScope, this.documentId ?? "");
+  }
+
+  /**
+   * Resolves the persistent attachment identity (`attachmentItemID`,
+   * non-provisional `fingerprint`, optional `fileSize` / `fileMtime`) once per
+   * open document in this session. Returns `null` when unavailable or provisional.
+   *
+   * @param {string|null} [overlayDocId]
+   * @returns {Promise<object|null>}
+   */
+  resolvePersistentIdentity(overlayDocId = this.documentId) {
+    if (this.destroyed || !this.persistentStore) return Promise.resolve(null);
+    const targetDocId = overlayDocId ?? this.documentId ?? null;
+    const itemID = this.reader?.itemID;
+    if (itemID === undefined || itemID === null || !targetDocId || isProvisionalDocumentId(targetDocId)) {
+      return Promise.resolve(null);
+    }
+    const cacheId = `${String(itemID)}|${targetDocId}`;
+    const cached = this.identityPromises.get(cacheId);
+    if (cached) return cached;
+
+    const task = resolveAttachmentIdentity({
+      reader: this.reader,
+      pdfDocument: this.currentPDFDocument(),
+      docId: targetDocId,
+      itemID,
+      io: this.persistentStore.io,
+      includeFileStat: !this.resolveAttachmentMeta,
+    })
+      .then(async (base) => {
+        if (!base || !this.resolveAttachmentMeta) return base;
+        try {
+          const meta = await this.resolveAttachmentMeta(base);
+          if (!meta || typeof meta !== "object") return base;
+          return {
+            ...base,
+            fileSize: meta.fileSize ?? base.fileSize,
+            fileMtime: meta.fileMtime ?? base.fileMtime,
+          };
+        } catch {
+          return base;
+        }
+      })
+      .catch(() => null);
+
+    this.identityPromises.set(cacheId, task);
+    return task;
   }
 
   /** Ensures a shared visibilitychange handler is created and bound to the reader's outer document. */
@@ -1641,6 +1703,7 @@ export class ReaderSession {
         this.catchUpPaint("pagesloaded");
         return;
       }
+      this.identityPromises.clear();
       this.regionCache.invalidateDocument(staleKey);
       this.detachAll();
       void this.repaintAttached();
@@ -1835,7 +1898,8 @@ export class ReaderSession {
     let overlay = this.overlays.get(pageNumber);
     if (!overlay) {
       try {
-        overlay = new PageOverlay({
+        let created;
+        created = new PageOverlay({
           pageView,
           innerWin: this.innerWin,
           // Scoped to this reader: two readers with the same printed fingerprint
@@ -1845,9 +1909,14 @@ export class ReaderSession {
           // the cache identity, this one says which document the paint read from.
           docId: this.documentId ?? null,
           regionCache: this.regionCache,
+          persistentStore: this.persistentStore,
+          resolveIdentity: this.persistentStore
+            ? () => this.resolvePersistentIdentity(created?.docId ?? this.documentId)
+            : null,
           resolveOPS: () => resolveOPS(this.innerWin, this.tag),
           tag: this.tag,
         });
+        overlay = created;
       } catch (err) {
         warnOnce("overlay-ctor", err);
         return null;
@@ -2115,6 +2184,54 @@ export class ReaderSession {
   }
 
   /**
+   * Refreshes one page overlay after a manual override mutation or page-level
+   * auto-cache invalidation, repainting if currently attached and enabled.
+   *
+   * @param {number} pageNumber
+   * @param {{forceDetect?: boolean}} [options]
+   */
+  refreshPageOverlay(pageNumber, { forceDetect = false } = {}) {
+    if (this.destroyed) return null;
+    const pageNum = Number(pageNumber);
+    if (!Number.isInteger(pageNum) || pageNum < 1) return null;
+    if (forceDetect) {
+      this.identityPromises.clear();
+      const key = this.cacheKey();
+      this.regionCache?.invalidateDocument?.(key);
+    }
+    const overlay = this.overlays.get(pageNum);
+    if (!overlay) return null;
+    overlay.clear();
+    if (!this.enabled) return null;
+    if (!this.isForeground()) {
+      this.workPausedInBackground = true;
+      this.paintOnSelectPending = true;
+      return null;
+    }
+    const job = this.attachPageNumber(pageNum);
+    return job;
+  }
+
+  /**
+   * Clears in-memory `RegionCache` entries and repaints active overlays after
+   * document-wide auto-cache invalidation while keeping manual overrides intact.
+   */
+  refreshDocumentAfterAutoInvalidation() {
+    if (this.destroyed) return;
+    this.identityPromises.clear();
+    this.regionCache?.invalidateDocument?.(this.cacheKey());
+    this.detachAll();
+    if (!this.enabled) return;
+    if (!this.isForeground()) {
+      this.workPausedInBackground = true;
+      this.paintOnSelectPending = true;
+      return;
+    }
+    void this.repaintAttached();
+    this.scheduleSettledCheck();
+  }
+
+  /**
    * How many overlay canvases are mounted *in the live DOM*. A canvas the viewer
    * threw out with an old page div is not counted: counting it is what let a hidden
    * document's stale mount mask a missing repaint on the visible one.
@@ -2195,6 +2312,8 @@ export class ReaderSession {
     }
     this.pending.clear();
     this.listeners.clear();
+    this.identityPromises.clear();
+    this.persistentStore = null;
     this.reader = null;
     this.regionCache = null;
   }

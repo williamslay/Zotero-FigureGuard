@@ -16,25 +16,27 @@ Detection layer `src/core/`:
 
 | File | Lines | Responsibility |
 | --- | --- | --- |
-| `detector.js` | 2076 | Takes `pdf.js` `getOperatorList()` + text layout and outputs figure bounding boxes for one page; filters decorative rules, full-page frames, and ruled tables/algorithms |
+| `detector.js` | 2745 | Takes `pdf.js` `getOperatorList()` + text layout and outputs figure bounding boxes for one page; filters decorative rules, full-page frames, and ruled tables/algorithms |
 | `detector-options.js` | 175 | Single source of truth for detection thresholds and flags |
-| `text-layout.js` | 771 | Text-line prose/caption blocker classification, typography prior, Table/Algorithm territory claiming, clear-sight geometry (`hasDirectSightValid`), page substrate filtering, standalone image gate, and 4-way label expansion |
-| `captions.js` | 239 | Caption-to-graphic region pairing |
+| `text-layout.js` | 787 | Text-line prose/caption blocker classification, typography prior, Table/Algorithm territory claiming, clear-sight geometry (`hasDirectSightValid`), page substrate filtering, standalone image gate, and 4-way label expansion |
+| `captions.js` | 591 | Text-line reconstruction, caption format matching, and anti-prose caption verification |
 | `placements.js` | 490 | Maps XObjects, inline/mask images, shading fills, clip paths (`W`/`W*`), and paths onto page coordinates |
 | `cache.js` | 180 | Caches region sets scoped by `item:<itemID>\|<documentFingerprint>` so tabs never cross-contaminate |
+| `region-overrides.js` | 671 | Pure schema revisions (`PERSISTENT_SCHEMA_VERSION`, `DETECTOR_CACHE_REVISION`), bbox validation, override mutations, and `resolveEffectiveRegions()` |
 | `pdf-source.js` | 126 | Document fingerprinting and document-level extraction |
 | `render.js` | 110 | Converts regions into canvas rendering parameters |
 | `geom.js` | 138 | Rectangle geometry utilities |
 | `viewport.js` | 83 | Viewport and page geometry helpers |
-| `index.js` | 54 | Public aggregation and `CORE_VERSION` |
+| `index.js` | 55 | Public aggregation and `CORE_VERSION` |
 
 Integration layer `src/zotero/`:
 
 | File | Lines | Responsibility |
 | --- | --- | --- |
-| `main.js` | 1769 | Entry point: `startup`/`shutdown`, Notifier wiring, `renderToolbar` handler, localized toolbar toggle (`原色` / `Original`), global `FigureGuard` API, `probeAll()` |
-| `reader-session.js` | 2201 | Single-reader lifecycle: realm resolution and ownership validation, document/page events, foreground-first priority queue, settled repaint checks |
-| `overlay.js` | 907 | Overlay canvas mounting, painting, geometry staleness (`geometryStale()`), and document connection (`isMounted()`) checks |
+| `main.js` | 2076 | Entry point: `startup`/`shutdown`, Notifier wiring, `renderToolbar` handler, localized toolbar toggle (`原色` / `Original`), global `FigureGuard` API, `probeAll()` |
+| `reader-session.js` | 2320 | Single-reader lifecycle: realm resolution and ownership validation, document/page events, foreground-first priority queue, settled repaint checks |
+| `overlay.js` | 1017 | Overlay canvas mounting, cache-first detection, painting, geometry staleness (`geometryStale()`), and document connection (`isMounted()`) checks |
+| `persistent-figure-store.js` | 1220 | Per-attachment JSON store (`<Zotero Data Directory>/figureguard/cache/item-<id>.json`), atomic writes, document replacement archival, manual override persistence |
 | `paint-probe.js` | 554 | Painting probe for real-device diagnostics |
 | `xray.js` | 330 | Xray-safe operator list extraction channel |
 | `realm-render.js` | 256 | Executes rendering inside the reader's own realm |
@@ -54,7 +56,7 @@ Treat these facts as fixed invariants when modifying `src/zotero/`:
 - On Windows, native tooltips are top-level OS windows that do not capture the mouse (`mozilla-central` `layout/xul/nsXULTooltipListener.cpp:554-556`), so "tooltip eats the first press" is not a valid explanation.
 - Notifier wiring is in `src/zotero/main.js:1060-1080`; tab switches produce `select` and opens produce `load`, both feeding `wakeTabSessions` (`src/zotero/main.js:955`).
 - After a reader panel stays hidden for ~60 s, Zotero unloads it and rebuilds its realm and `eventBus`; our session object persists because `sessions` is keyed by the reader object (`src/zotero/main.js:173`, `584-608`).
-- Global entry point is `Zotero.getMainWindow().FigureGuard`, exposing `startup`, `shutdown`, `setEnabled`, `clearCache`, `getSessions`, `getLog`, `runProbe`, `probeAll`, `probePaint`, `maintainButtons`, `wakeTabSessions`, and `version`.
+- Global entry point is `Zotero.getMainWindow().FigureGuard`, exposing `startup`, `shutdown`, `setEnabled`, `clearCache`, `getPersistentStore`, `invalidateAutoCache`, `suppressRegion`, `replaceRegion`, `addRegion`, `resetOverride`, `getEffectiveRegions`, `getSessions`, `getLog`, `runProbe`, `probeAll`, `probePaint`, `maintainButtons`, `wakeTabSessions`, and `version`.
 - There is **no `MutationObserver`** and **no `setInterval`** anywhere in the repository. All maintenance piggybacks on existing events; adding new listeners or timers requires explicit justification.
 
 ## Session, Button, and Overlay Ownership
@@ -100,8 +102,8 @@ Two GitHub Actions workflows (requiring only built-in `GITHUB_TOKEN`):
 
 ## Two-Tier Testing
 
-- `npm run test:ci` — Public CI tier; no copyrighted PDFs required. Runs PDF-free test files only (currently 18 files, 461 tests); `cancelled` must be 0.
-- `npm test` (`npm run test:fixture`) — Full maintainer regression (currently 25 files, 543 tests). Detection baselines rely on 5 copyrighted paper PDFs placed locally at the paths listed in [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md). When those PDFs are missing, 79 tests across 7 files are `cancelled` instead of failing, so full regression runs locally rather than as a public CI gate.
+- `npm run test:ci` — Public CI tier; no copyrighted PDFs required. Runs PDF-free test files only (currently 20 files, 496 tests); `cancelled` must be 0.
+- `npm test` (`npm run test:fixture`) — Full maintainer regression (currently 27 files, 578 tests). Detection baselines rely on 5 copyrighted paper PDFs placed locally at the paths listed in [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md). When those PDFs are missing, 79 tests across 7 files are `cancelled` instead of failing, so full regression runs locally rather than as a public CI gate.
 
 Always run tests via `npm test` or `npm run test:ci` (bare `node --test` triggers a spurious failure). Detection baselines (accepted region counts): PipeBWrite 18, FluidKV 18, Flash 10, Borges 9, plus HiKV fixtures. Whenever any threshold in `src/core/` changes, run `npm test` and verify these counts.
 

@@ -20,6 +20,7 @@
  */
 
 import { detectPageRegions } from "../core/index.js";
+import { resolveEffectiveRegions, serializeAutoRegions } from "../core/region-overrides.js";
 import { overlayGeometry } from "../core/viewport.js";
 import { renderRegion } from "../core/render.js";
 import { ensureRenderHelper, renderRegionViaHelper } from "./realm-render.js";
@@ -397,6 +398,7 @@ export function regionKindLabel(sourceKinds) {
     parts.push("xobject");
   }
   if (kinds.includes("struct")) parts.push("struct");
+  if (kinds.includes("manual")) parts.push("manual");
   return parts.length ? parts.join("+") : "unknown";
 }
 
@@ -418,14 +420,29 @@ export class PageOverlay {
    *   (`item:N|fcp:...`), which says nothing about the printed document identity a
    *   probe has to compare against the live document.
    * @param {number} [input.padViewport]
+   * @param {object|null} [input.persistentStore] Optional per-attachment persistent store.
+   * @param {(() => Promise<object|null>|object|null)|null} [input.resolveIdentity]
    */
-  constructor({ pageView, innerWin, documentId, regionCache, resolveOPS, tag = "", padViewport = PAD_VIEWPORT, docId = null }) {
+  constructor({
+    pageView,
+    innerWin,
+    documentId,
+    regionCache,
+    resolveOPS,
+    tag = "",
+    padViewport = PAD_VIEWPORT,
+    docId = null,
+    persistentStore = null,
+    resolveIdentity = null,
+  }) {
     this.pageView = pageView;
     this.innerWin = innerWin;
     this.documentId = documentId;
     /** @type {string|null} Raw document key for the canvas provenance stamp. */
     this.docId = docId ?? null;
     this.regionCache = regionCache;
+    this.persistentStore = persistentStore ?? null;
+    this.resolveIdentity = typeof resolveIdentity === "function" ? resolveIdentity : null;
     this.resolveOPS = typeof resolveOPS === "function" ? resolveOPS : () => undefined;
     this.tag = tag;
     this.padViewport = padViewport;
@@ -568,7 +585,7 @@ export class PageOverlay {
     if (!pdfPage) return null;
     if (!this.painted) {
       const cached = this.regionCache.get(this.documentId, this.pageNumber);
-      if (cached) {
+      if (cached && !this.persistentStore) {
         this.regionBoxes = cached.regions.map((region) => region.rect);
         this.regionKinds = cached.regions.map((region) => regionKindLabel(region.sourceKinds));
         this.diagnostics = cached.diagnostics ?? null;
@@ -578,8 +595,80 @@ export class PageOverlay {
         if (this.detectPromise && this.detectDocumentId === docKey) {
           return this.detectPromise;
         }
+        const applyDetected = (regions, diagnostics) => {
+          this.regionBoxes = regions.map((region) => region.rect);
+          this.regionKinds = regions.map((region) => regionKindLabel(region.sourceKinds));
+          this.diagnostics = diagnostics ?? null;
+          this.painted = true;
+          return { regions: this.regionBoxes, regionKinds: this.regionKinds, diagnostics: this.diagnostics };
+        };
         const run = (async () => {
+          const identity = this.resolveIdentity ? await this.resolveIdentity() : null;
+          if (this.destroyed || this.documentId !== docKey) return null;
+
+          const memCached = this.regionCache.get(docKey, this.pageNumber);
+          if (memCached) {
+            if (!identity || !this.persistentStore) {
+              return applyDetected(memCached.regions, memCached.diagnostics);
+            }
+            const versions = this.persistentStore.getVersionsSync(identity);
+            const autoEpochMatches =
+              memCached.autoEpoch == null || versions == null || memCached.autoEpoch === versions.autoEpoch;
+            if (autoEpochMatches && memCached.autoRegions === undefined) {
+              return applyDetected(memCached.regions, memCached.diagnostics);
+            }
+            if (
+              autoEpochMatches &&
+              memCached.autoRegions !== undefined &&
+              versions &&
+              memCached.overrideVersion === versions.overrideVersion
+            ) {
+              return applyDetected(memCached.regions, memCached.diagnostics);
+            }
+            if (autoEpochMatches && memCached.autoRegions !== undefined) {
+              const diskCheck = await this.persistentStore.getPageAutoCache(identity, this.pageNumber);
+              if (this.destroyed || this.documentId !== docKey) return null;
+              if (memCached.autoEpoch == null || diskCheck.autoEpoch === memCached.autoEpoch) {
+                const resolved = resolveEffectiveRegions(memCached.autoRegions, diskCheck.overrides);
+                this.regionCache.set(docKey, this.pageNumber, {
+                  regions: resolved.regions,
+                  autoRegions: memCached.autoRegions,
+                  diagnostics: memCached.diagnostics ?? null,
+                  overrideVersion: diskCheck.overrideVersion,
+                  autoEpoch: diskCheck.autoEpoch,
+                });
+                return applyDetected(resolved.regions, memCached.diagnostics);
+              }
+            }
+          }
+
           const token = this.regionCache.begin(docKey, this.pageNumber);
+          if (identity && this.persistentStore) {
+            const disk = await this.persistentStore.getPageAutoCache(identity, this.pageNumber);
+            if (this.destroyed || !this.regionCache.isCurrent(token) || this.documentId !== docKey) return null;
+            if (disk?.hit) {
+              const autoRegions = disk.regions;
+              const resolved = resolveEffectiveRegions(autoRegions, disk.overrides);
+              const diagnostics = {
+                cacheSource: "persistent",
+                detectorRevision: disk.detectorRevision,
+                autoRegionCount: autoRegions.length,
+                effectiveRegionCount: resolved.regions.length,
+                unresolvedOverrides: resolved.unresolvedOverrides.length,
+              };
+              this.regionCache.set(docKey, this.pageNumber, {
+                regions: resolved.regions,
+                autoRegions,
+                diagnostics,
+                overrideVersion: disk.overrideVersion,
+                autoEpoch: disk.autoEpoch,
+              });
+              return applyDetected(resolved.regions, diagnostics);
+            }
+          }
+
+          const autoEpochBefore =
+            identity && this.persistentStore ? this.persistentStore.getAutoEpoch(identity) : null;
           const result = await detectPageRegions({
             // Detection reads the page data out of the reader realm, so it gets a
             // local copy: TypedArray element access through an Xray wrapper throws.
@@ -588,16 +677,35 @@ export class PageOverlay {
             OPS: this.resolveOPS() ?? undefined,
           });
           if (this.destroyed || !this.regionCache.isCurrent(token) || this.documentId !== docKey) return null;
-          const regions = result?.regions ?? [];
+
+          const rawRegions = result?.regions ?? [];
+          const autoRegions = serializeAutoRegions(rawRegions);
+          let effectiveRegions = this.persistentStore ? autoRegions : rawRegions;
+          let overrideVersion = 0;
+          let autoEpoch = autoEpochBefore ?? 0;
+
+          if (identity && this.persistentStore) {
+            const saved = await this.persistentStore.savePageAutoCache(
+              identity,
+              this.pageNumber,
+              autoRegions,
+              { expectedAutoEpoch: autoEpochBefore },
+            );
+            if (this.destroyed || !this.regionCache.isCurrent(token) || this.documentId !== docKey) return null;
+            if (saved?.reason === "stale-auto-epoch") return null;
+            const resolved = resolveEffectiveRegions(autoRegions, saved?.overrides ?? []);
+            effectiveRegions = resolved.regions;
+            overrideVersion = saved?.overrideVersion ?? overrideVersion;
+            autoEpoch = saved?.autoEpoch ?? autoEpoch;
+          }
+
+          const diagnostics = result?.diagnostics ?? null;
           this.regionCache.set(docKey, this.pageNumber, {
-            regions,
-            diagnostics: result?.diagnostics ?? null,
+            regions: effectiveRegions,
+            ...(this.persistentStore ? { autoRegions, overrideVersion, autoEpoch } : {}),
+            diagnostics,
           });
-          this.regionBoxes = regions.map((region) => region.rect);
-          this.regionKinds = regions.map((region) => regionKindLabel(region.sourceKinds));
-          this.diagnostics = result?.diagnostics ?? null;
-          this.painted = true;
-          return { regions: this.regionBoxes, regionKinds: this.regionKinds, diagnostics: this.diagnostics };
+          return applyDetected(effectiveRegions, diagnostics);
         })();
         this.detectPromise = run;
         this.detectDocumentId = docKey;
@@ -903,5 +1011,7 @@ export class PageOverlay {
     this.pageView = null;
     this.innerWin = null;
     this.regionCache = null;
+    this.persistentStore = null;
+    this.resolveIdentity = null;
   }
 }

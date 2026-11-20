@@ -13,8 +13,9 @@
  * break PDF viewing, it is logged once per site and the reader keeps working.
  */
 
-import { CORE_VERSION, RegionCache } from "../core/index.js";
+import { CORE_VERSION, RegionCache, resolveEffectiveRegions, serializeAutoRegions } from "../core/index.js";
 import { resetWarnOnce, warnOnce, getWarnLog, resolveDocumentId, realmStamp } from "./overlay.js";
+import { PersistentFigureStore, normalizeAttachmentIdentity } from "./persistent-figure-store.js";
 import { probeOverlay } from "./paint-probe.js";
 import {
   ReaderSession,
@@ -166,9 +167,11 @@ const TOGGLE_CSS = `
 }
 `;
 
-// Module state lives in the bundle scope: one cache, one session per reader.
+// Module state lives in the bundle scope: one cache, one store, one session per reader.
 /** @type {RegionCache|null} */
 let regionCache = null;
+/** @type {PersistentFigureStore|null} */
+let persistentStore = null;
 /** @type {Map<object, {session: ReaderSession, startPromise: Promise<any>|null, closeWatch: object|null}>} */
 const sessions = new Map();
 /** @type {Map<ReaderSession, {button: object, session: ReaderSession, doc: object, onPointerDown: (event: object) => void, onMouseUp: (event: object) => void, onClick: (event: object) => void, off: () => void, toolbarDoc: object|null, append: ((node: object) => void)|null, parent: object|null}>} The toolbar button currently mounted per session, with its delegated activation listeners on the toolbar document. */
@@ -642,7 +645,13 @@ function ensureSession(reader) {
   if (existing) return existing.session;
   let session;
   try {
-    session = new ReaderSession({ reader, regionCache, tag: tagFor(reader), enabled });
+    session = new ReaderSession({
+      reader,
+      regionCache,
+      persistentStore,
+      tag: tagFor(reader),
+      enabled,
+    });
   } catch (err) {
     warnOnce("session-ctor", err);
     return null;
@@ -1173,6 +1182,7 @@ export function startup(data = {}) {
     // build is installed, and that matters most on a start that went wrong.
     addonVersion = String(data?.version ?? "");
     regionCache = new RegionCache({ maxEntries: 256 });
+    persistentStore = new PersistentFigureStore(data?.persistentStoreOptions ?? {});
     const zotero = getZotero();
     const readerAPI = zotero?.Reader ?? null;
     if (!readerAPI || typeof readerAPI.registerEventListener !== "function") {
@@ -1263,6 +1273,7 @@ export function shutdown() {
     buttonLinks.clear();
 
     regionCache = null;
+    persistentStore = null;
     lastDiagnostics = null;
   } catch (err) {
     warnOnce("shutdown", err);
@@ -1286,13 +1297,309 @@ export function setEnabled(next) {
   return enabled;
 }
 
-/** Drops the shared detection cache; the next paint re-runs detection. */
+/** Drops the in-memory detection cache only; persistent disk store and overrides stay intact. */
 export function clearCache() {
   try {
     regionCache?.clear();
   } catch (err) {
     warnOnce("clear-cache", err);
   }
+}
+
+/** @returns {PersistentFigureStore|null} Shared persistent cache & override store. */
+export function getPersistentStore() {
+  return persistentStore;
+}
+
+function collectMatchingSessions(identity) {
+  if (!identity) return [];
+  const matches = [];
+  for (const entry of sessions.values()) {
+    const s = entry?.session;
+    if (!s || s.destroyed) continue;
+    const itemId = s.reader?.itemID;
+    if (itemId === undefined || itemId === null || String(itemId) !== identity.storageKey) continue;
+    const docId = s.documentId;
+    if (!docId) continue;
+    const fp = docId.startsWith("fcp:") ? docId.slice(4) : docId;
+    if (fp === identity.fingerprint) matches.push(s);
+  }
+  return matches;
+}
+
+async function resolveStoreTarget(targetHint = null) {
+  const store = persistentStore;
+  if (!store) {
+    return { store: null, identity: null, matchedSessions: [], reason: "store-uninitialized" };
+  }
+
+  const explicitIdentity = normalizeAttachmentIdentity(targetHint);
+  if (explicitIdentity) {
+    return {
+      store,
+      identity: explicitIdentity,
+      matchedSessions: collectMatchingSessions(explicitIdentity),
+    };
+  }
+
+  let session = null;
+  if (targetHint && typeof targetHint.resolvePersistentIdentity === "function") {
+    session = targetHint;
+  } else if (targetHint && sessions.has(targetHint)) {
+    session = sessions.get(targetHint)?.session ?? null;
+  } else if (typeof targetHint === "number" || typeof targetHint === "string" || targetHint?.itemID != null || targetHint?.attachmentItemID != null) {
+    const wanted = String(targetHint?.attachmentItemID ?? targetHint?.itemID ?? targetHint);
+    for (const entry of sessions.values()) {
+      const s = entry?.session;
+      if (!s || s.destroyed) continue;
+      if (String(s.reader?.itemID ?? "") === wanted) {
+        session = s;
+        break;
+      }
+    }
+  } else if (targetHint == null) {
+    session = resolveProbeTarget().session;
+  }
+
+  if (!session || session.destroyed) {
+    return { store, identity: null, matchedSessions: [], reason: "no-target-session" };
+  }
+
+  const identity = await session.resolvePersistentIdentity();
+  if (!identity) {
+    return { store, identity: null, matchedSessions: [session], reason: "provisional-or-missing-identity" };
+  }
+  return {
+    store,
+    identity,
+    matchedSessions: collectMatchingSessions(identity),
+  };
+}
+
+function liveAutoRegionsForPage(matchedSessions, pageNumber) {
+  for (const session of matchedSessions) {
+    const key = session.cacheKey?.();
+    const cached = key ? session.regionCache?.get?.(key, pageNumber) : null;
+    if (cached) {
+      return serializeAutoRegions(cached.autoRegions ?? cached.regions ?? []);
+    }
+  }
+  return null;
+}
+
+function syncSessionsAfterOverride(matchedSessions, pageNumber, result) {
+  if (!result?.ok) return;
+  const pageNum = Number(pageNumber);
+  for (const session of matchedSessions) {
+    try {
+      const key = session.cacheKey?.();
+      const cached = key ? session.regionCache?.get?.(key, pageNum) : null;
+      if (cached && cached.autoRegions !== undefined && result.effective) {
+        session.regionCache.set(key, pageNum, {
+          ...cached,
+          regions: result.effective.regions,
+          overrideVersion: result.overrideVersion ?? cached.overrideVersion,
+          autoEpoch: result.autoEpoch ?? cached.autoEpoch,
+        });
+      }
+      session.refreshPageOverlay?.(pageNum, { forceDetect: false });
+    } catch (err) {
+      warnOnce("sync-override-session", err);
+    }
+  }
+}
+
+function parseSingleObjectForm(firstArg, pageArg) {
+  if (
+    pageArg === undefined &&
+    firstArg &&
+    typeof firstArg === "object" &&
+    ("pageNumber" in firstArg || "page" in firstArg)
+  ) {
+    const targetHint =
+      firstArg.identity ??
+      firstArg.session ??
+      firstArg.reader ??
+      (firstArg.attachmentItemID != null && firstArg.fingerprint ? firstArg : null) ??
+      (firstArg.itemID != null && firstArg.fingerprint ? firstArg : null) ??
+      firstArg.itemID ??
+      firstArg.attachmentItemID ??
+      null;
+    return {
+      isOptionsObj: true,
+      targetHint,
+      pageNumber: firstArg.pageNumber ?? firstArg.page,
+      opts: firstArg,
+    };
+  }
+  return { isOptionsObj: false, targetHint: firstArg ?? null, pageNumber: pageArg, opts: null };
+}
+
+/**
+ * Invalidates persistent `autoCache` entries (all pages or one `options.pageNumber`)
+ * while preserving all saved `manualOverrides`.
+ */
+export async function invalidateAutoCache(targetOrOptions = null, maybeOptions = {}) {
+  let targetHint = targetOrOptions;
+  let options = maybeOptions ?? {};
+  if (
+    targetOrOptions &&
+    typeof targetOrOptions === "object" &&
+    !targetOrOptions.resolvePersistentIdentity &&
+    !sessions.has(targetOrOptions) &&
+    !targetOrOptions.fingerprint &&
+    !targetOrOptions.docId &&
+    ("pageNumber" in targetOrOptions || "reader" in targetOrOptions || "session" in targetOrOptions || "identity" in targetOrOptions)
+  ) {
+    targetHint =
+      targetOrOptions.identity ??
+      targetOrOptions.session ??
+      targetOrOptions.reader ??
+      targetOrOptions.itemID ??
+      targetOrOptions.attachmentItemID ??
+      null;
+    options = targetOrOptions;
+  }
+
+  const resolved = await resolveStoreTarget(targetHint);
+  if (!resolved.store || !resolved.identity) {
+    return { ok: false, persisted: false, reason: resolved.reason ?? "no-target" };
+  }
+
+  const res = await resolved.store.invalidateAutoCache(resolved.identity, options);
+  if (res.ok) {
+    for (const session of resolved.matchedSessions) {
+      try {
+        if (options?.pageNumber != null) {
+          session.refreshPageOverlay?.(options.pageNumber, { forceDetect: true });
+        } else {
+          session.refreshDocumentAfterAutoInvalidation?.();
+        }
+      } catch (err) {
+        warnOnce("invalidate-auto-session", err);
+      }
+    }
+  }
+  return res;
+}
+
+/**
+ * Suppresses an auto-detected figure region (or removes a matching manual addition)
+ * and persists the manual override for the document attachment.
+ */
+export async function suppressRegion(targetOrOptions, pageNumberArg, targetArg, optionsArg = {}) {
+  const parsed = parseSingleObjectForm(targetOrOptions, pageNumberArg);
+  const target = parsed.isOptionsObj
+    ? parsed.opts.target ?? parsed.opts.region ?? parsed.opts.overrideId
+    : targetArg;
+  const options = parsed.isOptionsObj ? parsed.opts : (optionsArg ?? {});
+  const pageNumber = parsed.pageNumber;
+
+  const resolved = await resolveStoreTarget(parsed.targetHint);
+  if (!resolved.store || !resolved.identity) {
+    return { ok: false, persisted: false, reason: resolved.reason ?? "no-target" };
+  }
+  const liveAuto = options.autoRegions ?? liveAutoRegionsForPage(resolved.matchedSessions, Number(pageNumber));
+  const res = await resolved.store.suppressRegion(resolved.identity, pageNumber, target, {
+    ...options,
+    ...(liveAuto ? { autoRegions: liveAuto } : {}),
+  });
+  syncSessionsAfterOverride(resolved.matchedSessions, pageNumber, res);
+  return res;
+}
+
+/**
+ * Replaces an auto-detected figure region's bounding box cleanly without
+ * duplicating the original box.
+ */
+export async function replaceRegion(targetOrOptions, pageNumberArg, targetArg, newRectArg, optionsArg = {}) {
+  const parsed = parseSingleObjectForm(targetOrOptions, pageNumberArg);
+  const target = parsed.isOptionsObj ? parsed.opts.target : targetArg;
+  const newRect = parsed.isOptionsObj ? parsed.opts.newRect ?? parsed.opts.rect : newRectArg;
+  const options = parsed.isOptionsObj ? parsed.opts : (optionsArg ?? {});
+  const pageNumber = parsed.pageNumber;
+
+  const resolved = await resolveStoreTarget(parsed.targetHint);
+  if (!resolved.store || !resolved.identity) {
+    return { ok: false, persisted: false, reason: resolved.reason ?? "no-target" };
+  }
+  const liveAuto = options.autoRegions ?? liveAutoRegionsForPage(resolved.matchedSessions, Number(pageNumber));
+  const res = await resolved.store.replaceRegion(resolved.identity, pageNumber, target, newRect, {
+    ...options,
+    ...(liveAuto ? { autoRegions: liveAuto } : {}),
+  });
+  syncSessionsAfterOverride(resolved.matchedSessions, pageNumber, res);
+  return res;
+}
+
+/**
+ * Adds a manual figure bounding box on a page (even on an empty auto-cache page).
+ */
+export async function addRegion(targetOrOptions, pageNumberArg, rectArg, optionsArg = {}) {
+  const parsed = parseSingleObjectForm(targetOrOptions, pageNumberArg);
+  const rect = parsed.isOptionsObj ? parsed.opts.rect : rectArg;
+  const options = parsed.isOptionsObj ? parsed.opts : (optionsArg ?? {});
+  const pageNumber = parsed.pageNumber;
+
+  const resolved = await resolveStoreTarget(parsed.targetHint);
+  if (!resolved.store || !resolved.identity) {
+    return { ok: false, persisted: false, reason: resolved.reason ?? "no-target" };
+  }
+  const res = await resolved.store.addRegion(resolved.identity, pageNumber, rect, options);
+  syncSessionsAfterOverride(resolved.matchedSessions, pageNumber, res);
+  return res;
+}
+
+/**
+ * Removes one override (or all overrides on the page when `overrideIdOrTarget === "*"`
+ * or `options.all === true`), restoring original auto-detected regions immediately.
+ */
+export async function resetOverride(targetOrOptions, pageNumberArg, overrideIdOrTargetArg, optionsArg = {}) {
+  const parsed = parseSingleObjectForm(targetOrOptions, pageNumberArg);
+  const target = parsed.isOptionsObj
+    ? parsed.opts.overrideId ?? parsed.opts.target ?? (parsed.opts.all ? "*" : undefined)
+    : overrideIdOrTargetArg;
+  const options = parsed.isOptionsObj ? parsed.opts : (optionsArg ?? {});
+  const pageNumber = parsed.pageNumber;
+
+  const resolved = await resolveStoreTarget(parsed.targetHint);
+  if (!resolved.store || !resolved.identity) {
+    return { ok: false, persisted: false, reason: resolved.reason ?? "no-target" };
+  }
+  const liveAuto = options.autoRegions ?? liveAutoRegionsForPage(resolved.matchedSessions, Number(pageNumber));
+  const res = await resolved.store.resetOverride(resolved.identity, pageNumber, target, {
+    ...options,
+    ...(liveAuto ? { autoRegions: liveAuto } : {}),
+  });
+  syncSessionsAfterOverride(resolved.matchedSessions, pageNumber, res);
+  return res;
+}
+
+/**
+ * Returns the current resolved effective regions, cached auto regions, and
+ * manual overrides for one page (read-only query for UI / diagnostics).
+ */
+export async function getEffectiveRegions(targetOrOptions, pageNumberArg) {
+  const parsed = parseSingleObjectForm(targetOrOptions, pageNumberArg);
+  const pageNumber = Number(parsed.pageNumber);
+  const resolved = await resolveStoreTarget(parsed.targetHint);
+  if (!resolved.store || !resolved.identity) {
+    return { ok: false, reason: resolved.reason ?? "no-target", regions: [], autoRegions: [], overrides: [] };
+  }
+  const cached = await resolved.store.getPageAutoCache(resolved.identity, pageNumber);
+  const autoRegions = cached.hit
+    ? cached.regions
+    : liveAutoRegionsForPage(resolved.matchedSessions, pageNumber) ?? [];
+  const merged = resolveEffectiveRegions(autoRegions, cached.overrides);
+  return {
+    ok: true,
+    hit: cached.hit,
+    ...merged,
+    autoRegions,
+    overrides: cached.overrides,
+    overrideVersion: cached.overrideVersion,
+    autoEpoch: cached.autoEpoch,
+  };
 }
 
 /** Clears the once-per-site warning memory, mainly for debugging. */
