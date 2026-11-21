@@ -49,6 +49,7 @@ Zotero's built-in dark theme makes reading body text comfortable by inverting th
 - [Compatibility & Scope](#compatibility--scope)
 - [FAQ](#faq)
 - [Development & Documentation](#development--documentation)
+- [Community](#community)
 - [License](#license)
 
 ## At a Glance
@@ -175,6 +176,10 @@ Developer guides, release procedures, and coding-agent contracts live in dedicat
 | [docs/KNOWN_ISSUES.md](./docs/KNOWN_ISSUES.md) | Contributors / Maintainers | Real-device issues, root-cause notes, and verification checklist |
 | [docs/RELEASING.md](./docs/RELEASING.md) | Maintainers | Branch model, versioning rules, tag releases, and GitHub Pages `updates.json` |
 | [AGENTS.md](./AGENTS.md) | AI Coding Agents | Module contracts, Zotero runtime facts, test baselines, engineering constraints |
+
+## Community
+
+Welcome to share open-source tools and paper reading workflows with the [LINUX DO](https://linux.do/) community.
 
 ## License
 
