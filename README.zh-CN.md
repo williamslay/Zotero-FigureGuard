@@ -15,6 +15,7 @@
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-green?style=flat-square"></a>
   <a href="https://github.com/williamslay/Zotero-FigureGuard/stargazers"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/williamslay/Zotero-FigureGuard?style=flat-square"></a>
   <a href="https://github.com/williamslay/Zotero-FigureGuard/releases"><img alt="GitHub Downloads" src="https://img.shields.io/github/downloads/williamslay/Zotero-FigureGuard/total?style=flat-square"></a>
+  <a href="https://zoteroplugins.org/p/zotero-figureguard"><img alt="Zotero Plugins grade" src="https://zoteroplugins.org/badge/zotero-figureguard.svg"></a>
 </p>
 
 <p align="center">
