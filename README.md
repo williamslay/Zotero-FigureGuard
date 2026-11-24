@@ -16,6 +16,7 @@
   <a href="https://github.com/williamslay/Zotero-FigureGuard/stargazers"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/williamslay/Zotero-FigureGuard?style=flat-square"></a>
   <a href="https://github.com/williamslay/Zotero-FigureGuard/releases"><img alt="GitHub Downloads" src="https://img.shields.io/github/downloads/williamslay/Zotero-FigureGuard/total?style=flat-square"></a>
   <a href="https://zoteroplugins.org/p/zotero-figureguard"><img alt="Zotero Plugins grade" src="https://zoteroplugins.org/badge/zotero-figureguard.svg"></a>
+  <a href="https://zotero-chinese.com/plugins/"><img alt="Zotero 中文社区 · 已收录" src="https://zotero-chinese.com/badges/listed.svg"></a>
 </p>
 
 <p align="center">
