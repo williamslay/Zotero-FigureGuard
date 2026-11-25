@@ -50,6 +50,7 @@ Zotero 原生深色主题会把整页 PDF 无差别反色与重映射：正文�
 - [适用范围](#适用范围)
 - [常见问题](#常见问题)
 - [开发与文档](#开发与文档)
+- [友链](#友链)
 - [许可](#许可)
 
 ## 核心特性
@@ -176,6 +177,14 @@ npm run build       # 生成 dist/zotero-figure-guard-<版本>.xpi
 | [docs/KNOWN_ISSUES.md](./docs/KNOWN_ISSUES.md) | 开发者 / 排查者 | 真机现象、已排查根因与待验证事项 |
 | [docs/RELEASING.md](./docs/RELEASING.md) | 维护者 | 分支模型、版本号规则、Tag 发布与 GitHub Pages 自动更新清单 |
 | [AGENTS.md](./AGENTS.md) | AI 编码代理 | 模块契约、Zotero 运行时事实、测试基线与工程约束 |
+
+## 友链
+
+<p>
+  <a href="https://linux.do/t/topic/3216131"><img alt="LINUX DO" src="./assets/linuxdo-logo.svg" height="44"></a>
+  &nbsp;&nbsp;
+  <a href="https://alternativeto.net/software/zotero-figure-guard/about/?utm_source=badge&utm_medium=referral"><img alt="Zotero Figure Guard | AlternativeTo" src="https://alternativeto.net/static/badges/badge-compact-dark.svg" height="44"></a>
+</p>
 
 ## 许可
 

@@ -50,6 +50,7 @@ Zotero's built-in dark theme makes reading body text comfortable by inverting th
 - [Compatibility & Scope](#compatibility--scope)
 - [FAQ](#faq)
 - [Development & Documentation](#development--documentation)
+- [Links](#links)
 - [License](#license)
 
 ## At a Glance
@@ -176,6 +177,14 @@ Developer guides, release procedures, and coding-agent contracts live in dedicat
 | [docs/KNOWN_ISSUES.md](./docs/KNOWN_ISSUES.md) | Contributors / Maintainers | Real-device issues, root-cause notes, and verification checklist |
 | [docs/RELEASING.md](./docs/RELEASING.md) | Maintainers | Branch model, versioning rules, tag releases, and GitHub Pages `updates.json` |
 | [AGENTS.md](./AGENTS.md) | AI Coding Agents | Module contracts, Zotero runtime facts, test baselines, engineering constraints |
+
+## Links
+
+<p>
+  <a href="https://linux.do/t/topic/3216131"><img alt="LINUX DO" src="./assets/linuxdo-logo.svg" height="44"></a>
+  &nbsp;&nbsp;
+  <a href="https://alternativeto.net/software/zotero-figure-guard/about/?utm_source=badge&utm_medium=referral"><img alt="Zotero Figure Guard | AlternativeTo" src="https://alternativeto.net/static/badges/badge-compact-dark.svg" height="44"></a>
+</p>
 
 ## License
 
